@@ -6,17 +6,10 @@ import sys
 import os
 
 from PyQt6.QtWidgets import QApplication, QStyleFactory
+from PyQt6.QtGui import QIcon
 
 from interface.janela_principal import JanelaPrincipal
-
-
-def resource_path(relative_path):
-    """Retorna o caminho absoluto para um recurso, compatível com PyInstaller."""
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+from utils.caminhos import recurso_path
 
 
 def iniciar_aplicacao():
@@ -32,11 +25,16 @@ def iniciar_aplicacao():
 
     # Metadados da aplicação
     app.setApplicationName("NetLab Educacional")
-    app.setApplicationVersion("3.0")
+    app.setApplicationVersion("5.0")
     app.setOrganizationName("TCC - Técnico em Informática - Yuri Gonçalves Pavão")
 
-    # Carregar folha de estilos personalizada (tema escuro) usando resource_path
-    caminho_estilo = resource_path(os.path.join("recursos", "estilos", "tema_escuro.qss"))
+    # Definir o ícone da aplicação (janela e barra de tarefas)
+    caminho_icone = recurso_path("icone.ico")
+    if os.path.exists(caminho_icone):
+        app.setWindowIcon(QIcon(caminho_icone))
+
+    # Carregar folha de estilos personalizada (tema escuro) usando recurso_path
+    caminho_estilo = recurso_path(os.path.join("recursos", "estilos", "tema_escuro.qss"))
 
     if os.path.exists(caminho_estilo):
         with open(caminho_estilo, "r", encoding="utf-8") as arquivo:
@@ -44,7 +42,7 @@ def iniciar_aplicacao():
         print(f"Estilo carregado de: {caminho_estilo}")
     else:
         print(f"ERRO: Arquivo de estilo não encontrado em {caminho_estilo}")
-        print("   Verifique se o arquivo foi incluído no build com --add-data")
+        print("   Verifique se a pasta 'recursos' foi incluída no build.")
 
     # Criar e exibir a janela principal
     janela = JanelaPrincipal()
@@ -55,5 +53,3 @@ def iniciar_aplicacao():
 
 if __name__ == "__main__":
     iniciar_aplicacao()
-
-

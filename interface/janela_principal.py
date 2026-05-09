@@ -2860,7 +2860,7 @@ class JanelaPrincipal(QMainWindow):
 
             <h2 style="color:#3498DB; margin-bottom:2px;">NetLab Educacional</h2>
             <p style="color:#7f8c8d; font-size:11px; margin-top:0;">
-                Versão 4.0 &nbsp;·&nbsp; Curso Técnico em Informática
+                Versão 5.0 &nbsp;·&nbsp; Curso Técnico em Informática
             </p>
 
             <hr style="border:none; border-top:1px solid #1e2d40; margin:10px 0;">
