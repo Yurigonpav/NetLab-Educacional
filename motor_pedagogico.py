@@ -1,4 +1,4 @@
-﻿# motor_pedagogico.py
+# motor_pedagogico.py
 # Motor pedagógico do NetLab Educacional.
 #
 # FILOSOFIA DE ALERTAS:
@@ -17,6 +17,7 @@ import urllib.parse
 import re
 from datetime import datetime
 from utils.rede import corrigir_mojibake
+from utils.identificador import GerenciadorDispositivos
 
 # ── Campos sensíveis ─────────────────────────────────────────────────────────
 CAMPOS_SENSIVEIS = {
@@ -38,32 +39,7 @@ CAMPOS_SENSIVEIS = {
     "iban", "bic", "pix", "chave_pix",
 }
 
-# ── OUI → fabricante ─────────────────────────────────────────────────────────
-OUI_VENDORS = {
-    "001B63": "Apple",      "A8BE27": "Apple",      "F0DBE2": "Apple",
-    "3C0754": "Apple",      "BC926B": "Apple",      "D8BB2C": "Apple",
-    "001422": "Dell",       "B083FE": "Dell",       "848F69": "Dell",
-    "001A2B": "Intel",      "A0369F": "Intel",      "4CEB42": "Intel",
-    "001D09": "Samsung",    "38ECE4": "Samsung",    "ACC327": "Samsung",
-    "001A6B": "Lenovo",     "40742B": "Lenovo",     "54EEF7": "Lenovo",
-    "001E0B": "HP",         "3C4A92": "HP",         "B05ADA": "HP",
-    "00155D": "Microsoft",  "606BFF": "Microsoft",
-    "F88FCA": "Google",     "54607E": "Google",     "ACE415": "Google Nest",
-    "44650D": "Amazon Echo","0C5765": "Amazon Fire","74C246": "Amazon",
-    "000569": "Cisco",      "001C42": "Cisco",      "70B3D5": "Cisco Meraki",
-    "94D9B3": "TP-Link",    "F4F26D": "TP-Link",    "C025E9": "TP-Link",
-    "001E10": "Huawei",     "287B09": "Huawei",     "B4CD27": "Huawei",
-    "002722": "Ubiquiti",   "246895": "Ubiquiti",   "E063DA": "Ubiquiti",
-    "4C5E0C": "MikroTik",   "2CC8F3": "MikroTik",
-    "0014BF": "Netgear",    "20E52A": "Netgear",    "C03F0E": "Netgear",
-    "001CF0": "D-Link",     "34A84E": "D-Link",
-    "94652D": "Intelbras",  "7834E2": "Intelbras",
-    "B827EB": "Raspberry Pi","DCA632": "Raspberry Pi",
-    "BCDDC2": "Espressif",  "30AEA4": "Espressif",  "E868E7": "Espressif",
-    "000C29": "VMware",     "005056": "VMware vSphere",
-    "080027": "VirtualBox", "525400": "QEMU/KVM",
-    "0242AC": "Docker Bridge",
-}
+# (OUI_VENDORS removido para usar utils.identificador.GerenciadorDispositivos)
 
 _RE_MAC_SEP   = re.compile(r'[:\.\-\s]')
 _RE_CAMPO     = re.compile(
@@ -84,12 +60,10 @@ _RE_XSS = re.compile(
 
 
 def _fabricante(mac: str) -> str:
-    if not mac or len(mac) < 8:
+    if not mac:
         return ""
-    oui = _RE_MAC_SEP.sub("", mac).upper()[:6]
-    if not all(c in "0123456789ABCDEF" for c in oui):
-        return ""
-    return OUI_VENDORS.get(oui, "")
+    fab = GerenciadorDispositivos().identificar_fabricante(mac)
+    return fab if fab != "Desconhecido" else ""
 
 
 def _estimar_os(ttl) -> str:

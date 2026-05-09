@@ -25,11 +25,9 @@
 
 - [Sobre o Projeto](#sobre-o-projeto)
 - [Funcionalidades](#funcionalidades)
-- [Arquitetura](#arquitetura)
+- [Arquitetura e Estrutura](#arquitetura-e-estrutura-do-projeto)
 - [Requisitos do Sistema](#requisitos-do-sistema)
-- [Instalação](#instalação)
-- [Executável (Build sem Python)](#executável-build-sem-python)
-- [Como Executar](#como-executar)
+- [Guia do Desenvolvedor](#guia-do-desenvolvedor-ambiente-local)
 - [Fluxo de Uso Recomendado](#fluxo-de-uso-recomendado)
 - [Protocolos Analisados](#protocolos-analisados)
 - [Servidor de Laboratório](#servidor-de-laboratório)
@@ -37,7 +35,6 @@
 - [Persistência e Dados Gerados](#persistência-e-dados-gerados)
 - [Limitações Conhecidas](#limitações-conhecidas)
 - [Escopo Ético e Segurança](#escopo-ético-e-segurança)
-- [Estrutura do Projeto](#estrutura-do-projeto)
 - [Autor](#autor)
 
 ---
@@ -124,7 +121,7 @@ Recursos do painel:
 
 O `motor_pedagogico.py` gera explicações contextualizadas para cada protocolo usando os dados reais do pacote capturado (IP, porta, domínio, tamanho, TTL).
 
-- Suporte a **13 protocolos** com análise individualizada: HTTP, HTTPS, DNS, TCP SYN, TCP FIN, TCP RST, ICMP, ARP, DHCP, SSH, FTP, SMB, RDP, Novo Dispositivo.
+- Suporte a **14 eventos** com análise individualizada: HTTP, HTTPS, DNS, TCP SYN, TCP FIN, TCP RST, ICMP, ARP, DHCP, SSH, FTP, SMB, RDP e Novo Dispositivo.
 - Análise completa de DPI para HTTP: método, caminho, versão, headers, cookies e corpo.
 - Estimativa de sistema operacional pelo valor de **TTL** do pacote.
 - Identificação de fabricante pelo OUI integrada às explicações.
@@ -151,33 +148,38 @@ Veja a [seção dedicada](#servidor-de-laboratório) para detalhes completos.
 
 ---
 
-## Arquitetura
+## Arquitetura e Estrutura do Projeto
 
 ```
 NetLab Educacional
 │
-├── main.py                      ← Inicializa QApplication e abre a janela principal
-│
-├── interface/
-│   ├── janela_principal.py      ← Orquestra captura, timers, menus e abas
-│   ├── painel_topologia.py      ← Topologia interativa com zoom, pan e detalhes
-│   ├── painel_trafego.py        ← Gráfico EMA + navegação temporal + tabelas
-│   └── painel_eventos.py        ← Modo análise, filtros e explicações didáticas
-│
+├── main.py                      ← Ponto de entrada da aplicação
 ├── analisador_pacotes.py        ← Parse e classificação de pacotes em thread dedicada
-├── motor_pedagogico.py          ← Gerador de explicações por protocolo e risco
-├── netlab_core.py               ← Buffer circular de métricas thread-safe
-├── painel_servidor.py           ← Servidor HTTP vulnerável + painel Qt
-├── diagnostico.py               ← Diagnóstico autônomo de interfaces (standalone)
+├── motor_pedagogico.py          ← Gerador de explicações didáticas (DPI e heurísticas)
+├── painel_servidor.py           ← Servidor HTTP vulnerável + painel de controle Qt
+├── diagnostico.py               ← Script de diagnóstico autônomo de interfaces
+├── NetLab.spec                  ← Configuração de build (PyInstaller)
+├── requirements.txt             ← Dependências do projeto
 │
-├── utils/
-│   ├── constantes.py            ← Cores, portas e classificações compartilhadas
-│   ├── rede.py                  ← IP local, CIDR, validação e formatação
-│   ├── gerenciador_subredes.py  ← Sub-redes, visibilidade e rotas
-│   └── identificador.py        ← Fabricantes OUI, aliases e tipos de dispositivo
+├── interface/                   ← Camada de Visualização (PyQt6)
+│   ├── janela_principal.py      ← Janela principal e orquestração geral
+│   ├── painel_topologia.py      ← Mapa interativo de dispositivos
+│   ├── painel_trafego.py        ← Gráficos de banda e tabelas de protocolos
+│   └── painel_eventos.py        ← Modo Análise e explicações didáticas
 │
-└── recursos/estilos/
-    └── tema_escuro.qss          ← Tema visual da aplicação (Qt Style Sheet)
+├── utils/                       ← Camada de Lógica e Utilitários
+│   ├── caminhos.py              ← Resolução de caminhos para o executável
+│   ├── constantes.py            ← Cores, portas e definições globais
+│   ├── rede.py                  ← Funções de rede (IP, CIDR, Mojibake)
+│   ├── gerenciador_subredes.py  ← Descoberta e classificação de sub-redes
+│   └── identificador.py         ← Identificação de fabricantes (OUI) e apelidos
+│
+├── recursos/                    ← Assets visuais
+│   ├── estilos/tema_escuro.qss  ← Estilização da interface (CSS/QSS)
+│   └── icone.ico                ← Ícone oficial
+│
+└── dados/                       ← Persistência local
+    └── aliases.json             ← Apelidos de dispositivos salvos pelo usuário
 ```
 
 ### Fluxo de Captura
@@ -195,7 +197,7 @@ _CapturadorPacotesThread  ←── limite: 800 pps (Ethernet) / 400 pps (Wi-Fi)
 fila_pacotes_global (deque maxlen=20.000)
     │
     ▼
-ThreadAnalisador  ←── lotes de 200 pacotes
+ThreadAnalisador  ←── lotes de 200 pacotes (analisador_pacotes.py)
     │
     ▼
 eventos estruturados
@@ -249,94 +251,64 @@ manuf
 
 ---
 
-## Instalação
+## Guia do Desenvolvedor (Ambiente Local)
 
-### Configuração do ambiente de desenvolvimento
+Este repositório é destinado ao estudo e evolução do código-fonte. Se você deseja apenas utilizar o software, utilize o [Instalador Oficial](https://yurigonpav.github.io/NetLab-Site/#download). Para rodar ou modificar o projeto localmente, siga os passos abaixo:
+
+### 1. Configuração do Ambiente
 
 Abra o PowerShell **como Administrador** e execute:
 
 ```powershell
-git clone https://github.com/Yurigonpav/netlab-educacional.git
-cd netlab-educacional
+# Clonar o repositório
+git clone https://github.com/Yurigonpav/NetLab-Educacional.git
+cd NetLab-Educacional
 
+# Criar e ativar ambiente virtual
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 
+# Instalar dependências
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> Se a política de execução do PowerShell bloquear a ativação do ambiente virtual:
-> ```powershell
-> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-> ```
-> Depois ative novamente com `.\venv\Scripts\Activate.ps1`.
+> [!NOTE]
+> Se a política de execução do PowerShell bloquear a ativação: `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
 
----
+### 2. Execução via Código
 
-## Executável (Build sem Python)
-
-O NetLab pode ser empacotado em um único arquivo `.exe` com **PyInstaller**, permitindo distribuição sem instalação de Python ou dependências.
-
-### Pré-requisito
+Para iniciar a aplicação em modo de desenvolvimento:
 
 ```powershell
-pip install pyinstaller
-```
-
-### Gerando o executável
-
-```powershell
-# Ative o ambiente virtual primeiro
-.\venv\Scripts\Activate.ps1
-
-# Build com o spec oficial do projeto
-pyinstaller NetLab.spec
-```
-
-O executável será gerado em `dist\NetLab Educacional.exe`.
-
-### O que o spec inclui
-
-O arquivo `NetLab.spec` configura o PyInstaller para:
-
-- Incluir automaticamente a pasta `recursos/` (tema visual e assets).
-- Esconder as importações necessárias do Scapy e PyQt6.
-- Gerar um executável de janela sem console (`console=False`) com o nome **NetLab Educacional**.
-- Comprimir com UPX para reduzir o tamanho final.
-
-### Executando o .exe gerado
-
-O executável deve ser iniciado **como Administrador**, pois a captura de pacotes exige privilégios elevados:
-
-```
-Botão direito em dist\NetLab Educacional.exe → Executar como administrador
-```
-
-> O Npcap precisa estar instalado na máquina de destino mesmo ao usar o executável.
-
----
-
-## Como Executar
-
-### No ambiente de desenvolvimento
-
-```powershell
-# Abra o PowerShell como Administrador
-.\venv\Scripts\Activate.ps1
+# Com o venv ativo e como Administrador
 python main.py
 ```
 
-### Diagnóstico autônomo de interfaces
+### 3. Geração do Executável (.exe)
 
-Para identificar qual interface captura tráfego real antes de abrir o NetLab:
+O NetLab pode ser empacotado em um único arquivo para distribuição usando o **PyInstaller**:
 
 ```powershell
-.\venv\Scripts\Activate.ps1
-python diagnostico.py
+# Instalar o builder
+pip install pyinstaller
+
+# Gerar o executável usando o spec oficial
+pyinstaller NetLab.spec
 ```
 
-O script testa cada interface por 4 segundos e exibe quantos pacotes cada uma capturou. Copie o nome exato da interface ativa e selecione-a no combo do NetLab.
+O arquivo final será gerado em `dist\NetLab Educacional.exe`.
+
+> [!IMPORTANT]
+> Mesmo em modo executável, o **Npcap** deve estar instalado na máquina de destino e o programa deve ser iniciado como **Administrador**.
+
+### 4. Diagnóstico Standalone
+
+Para testar as interfaces de rede rapidamente sem abrir a interface gráfica completa:
+
+```powershell
+python diagnostico.py
+```
 
 ---
 
@@ -528,6 +500,7 @@ O NetLab minimiza intencionalmente a persistência de dados capturados. A maiori
 | Dado | Local | Finalidade |
 |---|---|---|
 | Apelidos de dispositivos | `dados/aliases.json` | Manter nomes personalizados de hosts entre sessões |
+| Relatórios de Diagnóstico | `diagnóstico/*.txt` | Exportações manuais de saúde do sistema |
 | Cache OUI do Wireshark | `~/.cache/manuf/manuf` | Acelerar a identificação de fabricantes por MAC |
 
 **Dados que existem apenas em memória (perdidos ao fechar):**
@@ -574,42 +547,7 @@ O NetLab Educacional foi desenvolvido para **ensino, demonstração e pesquisa e
 
 ---
 
-## Estrutura do Projeto
 
-```
-netlab-educacional/
-├── main.py                          ← Ponto de entrada da aplicação
-├── analisador_pacotes.py            ← Parser de pacotes com thread dedicada
-├── motor_pedagogico.py              ← Gerador de explicações didáticas
-├── netlab_core.py                   ← Métricas e buffer circular thread-safe
-├── painel_servidor.py               ← Servidor HTTP vulnerável + painel Qt
-├── diagnostico.py                   ← Diagnóstico autônomo de interfaces
-├── requirements.txt                 ← Dependências Python
-├── NetLab.spec                      ← Configuração PyInstaller (build .exe)
-├── README.md
-│
-├── interface/
-│   ├── __init__.py
-│   ├── janela_principal.py          ← Janela principal e orquestração geral
-│   ├── painel_eventos.py            ← Modo análise com filtros e explicações
-│   ├── painel_topologia.py          ← Topologia interativa da rede
-│   └── painel_trafego.py            ← Gráfico EMA e tabelas de tráfego
-│
-├── utils/
-│   ├── __init__.py
-│   ├── caminhos.py                  ← Resolução de paths (compatível com PyInstaller)
-│   ├── constantes.py                ← Cores, portas e classificações
-│   ├── gerenciador_subredes.py      ← Descoberta e classificação de sub-redes
-│   ├── identificador.py             ← Fabricantes OUI, aliases e tipos de dispositivo
-│   └── rede.py                      ← IP local, CIDR, validação e formatação
-│
-├── recursos/
-│   └── estilos/
-│       └── tema_escuro.qss          ← Tema visual Qt (dark theme)
-│
-└── dados/
-    └── aliases.json                 ← Criado automaticamente ao salvar apelidos
-```
 
 ---
 

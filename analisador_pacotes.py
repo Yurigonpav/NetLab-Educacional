@@ -151,6 +151,24 @@ def _parsear_pacote(dados: dict):
                 "porta_destino": porta_dest,
                 "protocolo":     "TCP",
             }
+        elif dados.get("flags") == "FIN":
+            evento = {
+                "tipo":          "TCP_FIN",
+                "ip_origem":     ip_origem,
+                "ip_destino":    ip_destino,
+                "porta_origem":  porta_orig,
+                "porta_destino": porta_dest,
+                "protocolo":     "TCP",
+            }
+        elif dados.get("flags") == "RST":
+            evento = {
+                "tipo":          "TCP_RST",
+                "ip_origem":     ip_origem,
+                "ip_destino":    ip_destino,
+                "porta_origem":  porta_orig,
+                "porta_destino": porta_dest,
+                "protocolo":     "TCP",
+            }
         elif porta_dest in PORTAS_SSH or porta_orig in PORTAS_SSH:
             protocolo_efetivo = "SSH"
             evento = {
