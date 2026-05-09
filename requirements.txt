@@ -3,4 +3,5 @@ scapy
 pyqtgraph
 cryptography
 manuf
+psutil
  

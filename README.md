@@ -239,6 +239,7 @@ scapy
 pyqtgraph
 cryptography
 manuf
+psutil
 ```
 
 | Pacote | Função |
@@ -248,6 +249,7 @@ manuf
 | `pyqtgraph` | Gráfico de tráfego em tempo real |
 | `cryptography` | Recursos criptográficos disponíveis ao projeto |
 | `manuf` | Identificação de fabricantes por OUI/MAC (base Wireshark) |
+| `psutil` | Coleta de estatísticas e metadados de interfaces de rede |
 
 ---
 
