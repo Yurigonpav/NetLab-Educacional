@@ -261,9 +261,12 @@ class DiagnosticoAvançado(QDialog):
 
         lay.addStretch()
 
+        btn_exportar = QPushButton("📋 Exportar TXT")
+        btn_exportar.setToolTip("Salva diagnóstico completo em arquivo de texto")
+        btn_exportar.clicked.connect(self._exportar_para_txt)
+        lay.addWidget(btn_exportar)
 
-
-        btn_atualizar = QPushButton("Atualizar")
+        btn_atualizar = QPushButton("🔄 Atualizar")
         btn_atualizar.clicked.connect(self.atualizar)
         lay.addWidget(btn_atualizar)
 
@@ -684,37 +687,65 @@ class DiagnosticoAvançado(QDialog):
         ip_local = self.main._mapa_interface_ip.get(desc_sel, "") or _obter_ip_local_seguro()
         prefixo_24 = ".".join(ip_local.split(".")[:3]) + "." if ip_local else ""
 
-        # ── 1. Tabela de rotas — prefere gateway na mesma /24 do IP local ───────
+        # ── 1. PowerShell Get-NetRoute (mais confiável no Windows moderno) ──────
         try:
-            saida = subprocess.check_output(
-                ["route", "print", "0.0.0.0"],
-                text=True, timeout=4,
+            proc = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' "
+                    "-ErrorAction SilentlyContinue | "
+                    "Sort-Object -Property RouteMetric | "
+                    "Select-Object -First 1).NextHop",
+                ],
+                capture_output=True, text=True, timeout=6,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            gateways = re.findall(
-                r'\s+0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)', saida
-            )
-            for gw in gateways:
-                if prefixo_24 and gw.startswith(prefixo_24):
-                    return gw
-            # Fallback: primeira rota padrão (mesmo que não seja da sub-rede local)
-            if gateways and not prefixo_24:
-                return gateways[0]
+            gw = (proc.stdout or "").strip()
+            if gw and re.match(r'^\d+\.\d+\.\d+\.\d+$', gw) and gw not in ("0.0.0.0", ""):
+                return gw
         except Exception:
             pass
 
-        # ── 2. Tabela ARP filtrada pela sub-rede do IP local ─────────────────────
+        # ── 2. route print -4 ────────────────────────────────────────────────────
+        try:
+            saida = subprocess.check_output(
+                ["route", "print", "-4"],
+                text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            gateways = re.findall(
+                r'^\s+0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)',
+                saida, re.MULTILINE,
+            )
+            # Prefere gateway na mesma /24 do IP local
+            for gw in gateways:
+                if prefixo_24 and gw.startswith(prefixo_24):
+                    return gw
+            # Fallback: primeiro gateway válido encontrado (corrige o bug original)
+            for gw in gateways:
+                if gw and gw != "0.0.0.0":
+                    return gw
+        except Exception:
+            pass
+
+        # ── 3. Tabela ARP — IPs terminados em .1 ou .254 na mesma /24 ───────────
         try:
             saida = subprocess.check_output(
                 ["arp", "-a"], text=True, timeout=4,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            # Primeira passagem: prefere mesma sub-rede
             for linha in saida.splitlines():
                 m = re.search(r'(\d+\.\d+\.\d+\.(?:1|254))\s+', linha)
                 if m:
                     ip_cand = m.group(1)
                     if not prefixo_24 or ip_cand.startswith(prefixo_24):
                         return ip_cand
+            # Segunda passagem: qualquer .1 ou .254 na tabela
+            for linha in saida.splitlines():
+                m = re.search(r'(\d+\.\d+\.\d+\.(?:1|254))\s+', linha)
+                if m:
+                    return m.group(1)
         except Exception:
             pass
 
@@ -822,7 +853,175 @@ class DiagnosticoAvançado(QDialog):
             f"<span style='font-weight:bold;'>{icone}</span>&nbsp;&nbsp;{texto}{extra}</div>"
         )
 
-
+    def _exportar_para_txt(self):
+        """Exporta diagnóstico completo para arquivo TXT."""
+        from PyQt6.QtWidgets import QFileDialog
+        
+        caminho = QFileDialog.getSaveFileName(
+            self,
+            "Salvar Diagnóstico",
+            f"NetLab-Diagnostico-{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+            "Arquivos de Texto (*.txt);;Todos (*)"
+        )[0]
+        
+        if not caminho:
+            return
+        
+        try:
+            rel = self._ultimo_relatorio
+            
+            # Monta conteúdo do TXT
+            linhas = [
+                "=" * 80,
+                "RELATÓRIO DE DIAGNÓSTICO — NETLAB EDUCACIONAL",
+                "=" * 80,
+                "",
+                f"Gerado em: {rel.get('timestamp', 'N/A')}",
+                f"Versão Python: {platform.python_version()}",
+                f"Sistema Operacional: {platform.system()} {platform.release()}",
+                "",
+                "-" * 80,
+                "CHECKLIST RÁPIDO",
+                "-" * 80,
+                "",
+            ]
+            
+            # Privilégios
+            linhas.append(f"Privilégios de Administrador: {'✓ SIM' if rel.get('eh_admin') else '✗ NÃO'}")
+            if not rel.get('eh_admin'):
+                linhas.append("  → Dica: Execute o NetLab como Administrador para criar regras de firewall")
+            
+            # Npcap
+            linhas.append(f"Npcap: {rel.get('versao_npcap', 'N/A')}")
+            if rel.get('versao_npcap') == 'N/A':
+                linhas.append("  → Erro: Npcap não instalado. Baixe em https://npcap.com")
+                linhas.append("  → Certifique-se de marcar 'WinPcap API-compatible mode' na instalação")
+            
+            # Scapy
+            linhas.append(f"Scapy: {rel.get('versao_scapy', 'N/A')}")
+            if rel.get('versao_scapy') == 'N/A':
+                linhas.append("  → Erro: Scapy não instalado. Execute: pip install scapy")
+            
+            linhas.extend(["", "-" * 80, "INTERFACE DE REDE", "-" * 80, ""])
+            
+            linhas.append(f"Interface Selecionada: {rel.get('interface', 'N/A')}")
+            linhas.append(f"Nome do Dispositivo: {rel.get('nome_iface', 'N/A')}")
+            linhas.append(f"IP Local: {rel.get('ip_local', 'N/A')}")
+            
+            snap = rel.get('snap', {})
+            linhas.append(f"Total de Pacotes Capturados: {snap.get('total_pacotes', 0):,}")
+            linhas.append(f"Volume Total: {snap.get('total_bytes', 0) / 1024 / 1024:.2f} MB")
+            
+            iface_info = rel.get('iface', {})
+            if iface_info.get('disponivel'):
+                drops = iface_info.get('drops', 0)
+                erros = iface_info.get('erros', 0)
+                linhas.append(f"Pacotes Descartados (Drops): {drops}")
+                if drops > 0:
+                    linhas.append("  → Dica: Aumentar buffer do Npcap em constantes.py (conf.bufsize)")
+                linhas.append(f"Erros de Recepção: {erros}")
+                if erros > 0:
+                    linhas.append("  → Dica: Verifique drivers da placa de rede")
+            
+            linhas.extend(["", "-" * 80, "CONECTIVIDADE", "-" * 80, ""])
+            
+            gw_info = rel.get('gateway', {})
+            linhas.append(f"Gateway: {gw_info.get('gateway', 'N/A')}")
+            linhas.append(f"Status: {'✓ Alcançável' if gw_info.get('ok') else '✗ Inacessível'}")
+            if gw_info.get('ok'):
+                linhas.append(f"Latência: {gw_info.get('latencia_ms', 'N/A')} ms")
+            else:
+                linhas.append("  → Erro: Gateway inacessível")
+                linhas.append("  → Dica: Verifique conexão com o roteador/internet")
+            
+            dns_info = rel.get('dns', {})
+            linhas.append(f"DNS (google.com): {'✓ Funciona' if dns_info.get('ok') else '✗ Falha'}")
+            if dns_info.get('ok'):
+                linhas.append(f"Resposta: {dns_info.get('texto', 'N/A')}")
+                linhas.append(f"Tempo: {dns_info.get('tempo_ms', 'N/A')} ms")
+            else:
+                linhas.append("  → Erro: Resolução DNS falhou")
+                linhas.append("  → Dica: Verifique se tem acesso à internet")
+            
+            wifi_info = rel.get('wifi', {})
+            if wifi_info and wifi_info.get('disponivel'):
+                linhas.extend(["", "-" * 80, "WI-FI", "-" * 80, ""])
+                linhas.append(f"SSID: {wifi_info.get('ssid', 'N/A')}")
+                linhas.append(f"BSSID: {wifi_info.get('bssid', 'N/A')}")
+                linhas.append(f"Sinal: {wifi_info.get('sinal_pct', 0)}%")
+                if wifi_info.get('sinal_pct', 0) < 45:
+                    linhas.append("  → Aviso: Sinal Wi-Fi fraco — captura pode ser instável")
+                linhas.append(f"Canal: {wifi_info.get('canal', 'N/A')}")
+                linhas.append(f"Velocidade: {wifi_info.get('velocidade', 'N/A')}")
+                linhas.append("")
+                linhas.append("⚠️ LIMITAÇÃO WI-FI NO WINDOWS:")
+                linhas.append("   O driver impede captura de outros dispositivos em modo promíscuo.")
+                linhas.append("   Para demonstração em sala, use o Hotspot do Windows.")
+            
+            linhas.extend(["", "-" * 80, "VERSÕES DOS COMPONENTES", "-" * 80, ""])
+            linhas.append(f"Python: {platform.python_version()}")
+            linhas.append(f"Npcap: {rel.get('versao_npcap', 'N/A')}")
+            linhas.append(f"Scapy: {rel.get('versao_scapy', 'N/A')}")
+            linhas.append(f"PyQt6: {self._versao_pyqt6()}")
+            
+            linhas.extend(["", "-" * 80, "RECOMENDAÇÕES", "-" * 80, ""])
+            
+            # Análise e recomendações
+            problemas = []
+            avisos_txt = []
+            
+            if not rel.get('eh_admin'):
+                problemas.append("Não está executando como Administrador")
+            if rel.get('versao_npcap') == 'N/A':
+                problemas.append("Npcap não instalado")
+            if rel.get('versao_scapy') == 'N/A':
+                problemas.append("Scapy não instalado")
+            if not gw_info.get('ok'):
+                problemas.append("Gateway inacessível")
+            if not dns_info.get('ok'):
+                problemas.append("DNS não funciona")
+            
+            if iface_info.get('drops', 0) > 0:
+                avisos_txt.append(f"Detectados {iface_info.get('drops', 0)} pacotes descartados")
+            if iface_info.get('erros', 0) > 0:
+                avisos_txt.append(f"Detectados {iface_info.get('erros', 0)} erros de recepção")
+            if wifi_info and wifi_info.get('sinal_pct', 0) < 45:
+                avisos_txt.append("Sinal Wi-Fi fraco")
+            
+            if problemas:
+                linhas.append("PROBLEMAS ENCONTRADOS:")
+                for p in problemas:
+                    linhas.append(f"  ✗ {p}")
+                linhas.append("")
+            
+            if avisos_txt:
+                linhas.append("AVISOS:")
+                for a in avisos_txt:
+                    linhas.append(f"  ⚠ {a}")
+                linhas.append("")
+            
+            if not problemas:
+                linhas.append("✓ Nenhum problema detectado!")
+                linhas.append("")
+                linhas.append("Seu sistema está pronto para:")
+                linhas.append("  • Capturar tráfego de rede com sucesso")
+                linhas.append("  • Analisar dispositivos na topologia")
+                linhas.append("  • Acessar o servidor de outros dispositivos (inicie o servidor)")
+            
+            linhas.extend(["", "=" * 80])
+            
+            # Salva arquivo
+            conteudo = "\n".join(linhas)
+            with open(caminho, 'w', encoding='utf-8') as f:
+                f.write(conteudo)
+            
+            QMessageBox.information(
+                self,
+                "Sucesso",
+                f"Diagnóstico exportado para:\n{caminho}"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao Exportar", f"Falha: {e}")
 
 
 # ── Função auxiliar fora da classe ──────────────────────────────────────────

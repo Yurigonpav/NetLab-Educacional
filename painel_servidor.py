@@ -2624,14 +2624,23 @@ class PainelServidor(QWidget):
         widget.style().unpolish(widget)
         widget.style().polish(widget)
 
-    def _adicionar_regra_firewall(self, porta: int):
+    def _adicionar_regra_firewall(self, porta: int) -> bool:
         """Cria regra de entrada no Windows Firewall para a porta do servidor."""
+        nome_regra = f"NetLab-Servidor-{porta}"
         try:
+            # Remove regra anterior com mesmo nome (evita duplicatas ou regras corrompidas)
+            subprocess.run(
+                ["netsh", "advfirewall", "firewall", "delete", "rule",
+                 f"name={nome_regra}"],
+                capture_output=True, timeout=5, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            # Adiciona nova regra cobrindo todos os perfis de rede (Domain/Private/Public)
             proc = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "add", "rule",
-                 f"name=NetLab Educacional Servidor {porta}",
+                 f"name={nome_regra}",
                  "protocol=TCP", "dir=in", "action=allow",
-                 f"localport={porta}"],
+                 f"localport={porta}", "profile=any", "enable=yes"],
                 capture_output=True, timeout=5, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
@@ -2639,12 +2648,13 @@ class PainelServidor(QWidget):
         except Exception:
             return False
 
-    def _remover_regra_firewall(self, porta: int):
+    def _remover_regra_firewall(self, porta: int) -> bool:
         """Remove a regra criada ao parar o servidor."""
+        nome_regra = f"NetLab-Servidor-{porta}"
         try:
             proc = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "delete", "rule",
-                 f"name=NetLab Educacional Servidor {porta}"],
+                 f"name={nome_regra}"],
                 capture_output=True, timeout=5, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
@@ -2653,20 +2663,21 @@ class PainelServidor(QWidget):
             return False
 
     def _verificar_regra_firewall(self, porta: int) -> bool:
-        """Verifica se existe regra de firewall criada para a porta do servidor."""
+        """Verifica se existe regra de firewall ativa para a porta do servidor."""
+        nome_regra = f"NetLab-Servidor-{porta}"
         try:
             proc = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "show", "rule",
-                 f"name=NetLab Educacional Servidor {porta}"],
+                 f"name={nome_regra}"],
                 capture_output=True, text=True, timeout=4,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            out = (proc.stdout or "") + (proc.stderr or "")
-            if "No rules match the specified criteria" in out or "No rules match" in out:
-                return False
-            # If output contains 'Rule Name' or similar, consider it exists
-            if "Rule Name" in out or "Aplicar a" in out or "Name:" in out:
-                return True
-            return proc.returncode == 0 and bool(out.strip())
+            out = proc.stdout or ""
+            # Considera existente se a saída contém o nome ou campos de regra
+            return (
+                nome_regra in out
+                or "Rule Name" in out
+                or "Nome da Regra" in out
+            )
         except Exception:
             return False
