@@ -8,8 +8,17 @@ import os
 from PyQt6.QtWidgets import QApplication, QStyleFactory
 from PyQt6.QtGui import QIcon
 
+# Helper to resolve resource paths both in development and when bundled with PyInstaller
+def resource_path(relative_path):
+    """Return absolute path for resources, works with PyInstaller's temp folder."""
+    try:
+        base_path = sys._MEIPASS  # PyInstaller creates a temp folder and stores path in this attribute
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 from interface.janela_principal import JanelaPrincipal
-from utils.caminhos import recurso_path
+
 
 
 def iniciar_aplicacao():
@@ -29,19 +38,19 @@ def iniciar_aplicacao():
     app.setOrganizationName("TCC - Técnico em Informática - Yuri Gonçalves Pavão")
 
     # Definir o ícone da aplicação (janela e barra de tarefas)
-    caminho_icone = recurso_path("icone.ico")
+    caminho_icone = resource_path("icone.ico")
     if os.path.exists(caminho_icone):
         app.setWindowIcon(QIcon(caminho_icone))
 
     # Carregar folha de estilos personalizada (tema escuro) usando recurso_path
-    caminho_estilo = recurso_path(os.path.join("recursos", "estilos", "tema_escuro.qss"))
-
-    if os.path.exists(caminho_estilo):
-        with open(caminho_estilo, "r", encoding="utf-8") as arquivo:
+    # Load dark theme stylesheet using resource_path (works in bundled exe)
+    qss_path = resource_path(os.path.join("recursos", "estilos", "tema_escuro.qss"))
+    if os.path.exists(qss_path):
+        with open(qss_path, "r", encoding="utf-8") as arquivo:
             app.setStyleSheet(arquivo.read())
-        print(f"Estilo carregado de: {caminho_estilo}")
+        print(f"Estilo carregado de: {qss_path}")
     else:
-        print(f"ERRO: Arquivo de estilo não encontrado em {caminho_estilo}")
+        print(f"ERRO: Arquivo de estilo não encontrado em {qss_path}")
         print("   Verifique se a pasta 'recursos' foi incluída no build.")
 
     # Criar e exibir a janela principal

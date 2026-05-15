@@ -261,12 +261,12 @@ class DiagnosticoAvançado(QDialog):
 
         lay.addStretch()
 
-        btn_exportar = QPushButton("📋 Exportar TXT")
+        btn_exportar = QPushButton("Exportar TXT")
         btn_exportar.setToolTip("Salva diagnóstico completo em arquivo de texto")
         btn_exportar.clicked.connect(self._exportar_para_txt)
         lay.addWidget(btn_exportar)
 
-        btn_atualizar = QPushButton("🔄 Atualizar")
+        btn_atualizar = QPushButton("Atualizar")
         btn_atualizar.clicked.connect(self.atualizar)
         lay.addWidget(btn_atualizar)
 
@@ -577,12 +577,23 @@ class DiagnosticoAvançado(QDialog):
     def _adicionar_secao_pendencias(self, problemas, avisos):
         secao = _SecaoColapsavel("  Pendências Detectadas", self._COR_AVISO)
         html = "<div style='line-height:2.0;'>"
+        # Mapping of problem/warning to fix instructions
+        instrucoes = {
+            "Não está executando como Administrador": "Execute o NetLab como Administrador.",
+            "Npcap não instalado": "Baixe e instale o Npcap em https://npcap.com, marcando \"WinPcap API-compatible mode\".",
+            "Scapy não instalado": "Instale o Scapy via 'pip install scapy'.",
+            "Gateway inacessível": "Verifique a conexão física ao roteador e se o gateway está configurado corretamente.",
+            "DNS não funciona": "Verifique a conectividade com a internet e as configurações de DNS.",
+            "Sinal Wi-Fi fraco": "Aproxime-se do ponto de acesso ou utilize conexão cabeada.",
+            "Pacotes descartados (Drops)": "Aumente o buffer do Npcap em constantes.py (conf.bufsize).",
+            "Erros de Recepção": "Verifique drivers da placa de rede ou substitua o hardware.",
+        }
         for p in problemas:
-            html += (f"<div style='color:{self._COR_ERRO}; font-size:11px;'>"
-                     f" &nbsp;{p}</div>")
+            fix = instrucoes.get(p, "Consulte a documentação para mais detalhes.")
+            html += f"<div style='color:{self._COR_ERRO}; font-size:11px;'>{p}<br><span style='color:{self._COR_DIM}; font-size:9px;'>→ {fix}</span></div>"
         for a in avisos:
-            html += (f"<div style='color:{self._COR_AVISO}; font-size:11px;'>"
-                     f" &nbsp;{a}</div>")
+            fix = instrucoes.get(a, "Consulte a documentação para mais detalhes.")
+            html += f"<div style='color:{self._COR_AVISO}; font-size:11px;'>{a}<br><span style='color:{self._COR_DIM}; font-size:9px;'>→ {fix}</span></div>"
         html += "</div>"
         lbl = QLabel(html)
         lbl.setWordWrap(True)
