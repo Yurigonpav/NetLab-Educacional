@@ -17,6 +17,7 @@ from socketserver import ThreadingMixIn
 from typing import Optional
 from urllib.parse import parse_qs
 import socket
+import subprocess
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -2419,6 +2420,20 @@ class PainelServidor(QWidget):
         self._clientes_unicos      = set()
         self._contador_por_segundo = 0
 
+        # Cria regra de entrada no Firewall do Windows antes de iniciar o servidor
+        try:
+            ok = self._adicionar_regra_firewall(self._porta_atual)
+            if not ok:
+                self._adicionar_alerta(
+                    "AVISO",
+                    f"Não foi possível criar regra de firewall para a porta {self._porta_atual}. Verifique privilégios de administrador."
+                )
+        except Exception:
+            self._adicionar_alerta(
+                "AVISO",
+                f"Falha ao tentar criar regra de firewall para a porta {self._porta_atual}."
+            )
+
         self._thread_servidor = ThreadServidor(self._porta_atual)
         self._thread_servidor.start()
         self._servidor_ativo = True
@@ -2464,6 +2479,18 @@ class PainelServidor(QWidget):
 
         # Encerra a conexao — todos os dados sao descartados
         banco_servidor.encerrar()
+        try:
+            ok = self._remover_regra_firewall(self._porta_atual)
+            if not ok:
+                self._adicionar_alerta(
+                    "AVISO",
+                    f"Não foi possível remover a regra de firewall para a porta {self._porta_atual}. Remoção manual pode ser necessária."
+                )
+        except Exception:
+            self._adicionar_alerta(
+                "AVISO",
+                f"Falha ao tentar remover regra de firewall para a porta {self._porta_atual}."
+            )
 
         self._servidor_ativo = False
         self.btn_iniciar.setText("Iniciar Servidor")
@@ -2596,3 +2623,50 @@ class PainelServidor(QWidget):
         """Reaplica o estilo Qt apos mudar o objectName do botao."""
         widget.style().unpolish(widget)
         widget.style().polish(widget)
+
+    def _adicionar_regra_firewall(self, porta: int):
+        """Cria regra de entrada no Windows Firewall para a porta do servidor."""
+        try:
+            proc = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "add", "rule",
+                 f"name=NetLab Educacional Servidor {porta}",
+                 "protocol=TCP", "dir=in", "action=allow",
+                 f"localport={porta}"],
+                capture_output=True, timeout=5, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    def _remover_regra_firewall(self, porta: int):
+        """Remove a regra criada ao parar o servidor."""
+        try:
+            proc = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "delete", "rule",
+                 f"name=NetLab Educacional Servidor {porta}"],
+                capture_output=True, timeout=5, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return proc.returncode == 0
+        except Exception:
+            return False
+
+    def _verificar_regra_firewall(self, porta: int) -> bool:
+        """Verifica se existe regra de firewall criada para a porta do servidor."""
+        try:
+            proc = subprocess.run(
+                ["netsh", "advfirewall", "firewall", "show", "rule",
+                 f"name=NetLab Educacional Servidor {porta}"],
+                capture_output=True, text=True, timeout=4,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+            if "No rules match the specified criteria" in out or "No rules match" in out:
+                return False
+            # If output contains 'Rule Name' or similar, consider it exists
+            if "Rule Name" in out or "Aplicar a" in out or "Name:" in out:
+                return True
+            return proc.returncode == 0 and bool(out.strip())
+        except Exception:
+            return False

@@ -336,6 +336,26 @@ class DiagnosticoAvançado(QDialog):
         _checar(info_gateway["ok"] and (info_gateway.get("latencia_ms") or 0) <= 50, 1, "Gateway inacessível", "Latência alta ao gateway" if info_gateway["ok"] else "")
         _checar(info_iface.get("drops", 0) == 0, 1, "",
                 f"Drops detectados: {info_iface.get('drops', 0)} pacotes" if info_iface.get("drops", 0) > 0 else "")
+        
+        # Verifica regra de firewall do servidor (se aplicável)
+        try:
+            painel_srv = getattr(self.main, 'painel_servidor', None)
+            if painel_srv:
+                porta_srv = getattr(painel_srv, '_porta_atual', None)
+                servidor_ativo = getattr(painel_srv, '_servidor_ativo', False)
+                if porta_srv is not None:
+                    fw_ok = False
+                    try:
+                        fw_ok = painel_srv._verificar_regra_firewall(porta_srv)
+                    except Exception:
+                        fw_ok = False
+                    if servidor_ativo and not fw_ok:
+                        problemas.append(f"Firewall bloqueando o servidor (porta {porta_srv})")
+                    elif not servidor_ativo and not fw_ok:
+                        avisos.append("Regra de firewall ausente — se pretende acessar o servidor de outros dispositivos, inicie o servidor e permita a porta no firewall.")
+                        
+        except Exception:
+            pass
 
         # Reconstrói seções
         self._limpar_secoes()
@@ -660,41 +680,39 @@ class DiagnosticoAvançado(QDialog):
             return {"ok": False, "texto": f"Erro no ping: {e}", "latencia_ms": None}
 
     def _descobrir_gateway(self) -> str:
-        """Tenta encontrar o gateway via tabela de rotas e, depois, via ARP filtrado por sub-rede."""
+        desc_sel = self.main.combo_interface.currentText()
+        ip_local = self.main._mapa_interface_ip.get(desc_sel, "") or _obter_ip_local_seguro()
+        prefixo_24 = ".".join(ip_local.split(".")[:3]) + "." if ip_local else ""
 
-        # ── 1. Prioridade: rota padrão (mais confiável) ─────────────────────
+        # ── 1. Tabela de rotas — prefere gateway na mesma /24 do IP local ───────
         try:
             saida = subprocess.check_output(
                 ["route", "print", "0.0.0.0"],
-                text=True,
-                timeout=4,
+                text=True, timeout=4,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            m = re.search(
+            gateways = re.findall(
                 r'\s+0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)', saida
             )
-            if m:
-                return m.group(1)
+            for gw in gateways:
+                if prefixo_24 and gw.startswith(prefixo_24):
+                    return gw
+            # Fallback: primeira rota padrão (mesmo que não seja da sub-rede local)
+            if gateways and not prefixo_24:
+                return gateways[0]
         except Exception:
             pass
 
-        # ── 2. Fallback: tabela ARP filtrada pela sub-rede do IP local ───────
-        desc_sel   = self.main.combo_interface.currentText()
-        ip_local   = self.main._mapa_interface_ip.get(desc_sel, "") or _obter_ip_local_seguro()
-        prefixo_24 = ".".join(ip_local.split(".")[:3]) + "." if ip_local else ""
-
+        # ── 2. Tabela ARP filtrada pela sub-rede do IP local ─────────────────────
         try:
             saida = subprocess.check_output(
-                ["arp", "-a"],
-                text=True,
-                timeout=4,
+                ["arp", "-a"], text=True, timeout=4,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
             for linha in saida.splitlines():
                 m = re.search(r'(\d+\.\d+\.\d+\.(?:1|254))\s+', linha)
                 if m:
                     ip_cand = m.group(1)
-                    # Só aceita se estiver na mesma sub-rede /24 do IP local
                     if not prefixo_24 or ip_cand.startswith(prefixo_24):
                         return ip_cand
         except Exception:
@@ -957,6 +975,12 @@ class _CapturadorPacotesThread(QThread):
 
     def run(self):
         self._rodando = True
+        # Aumenta o ring buffer do Npcap para redes institucionais de alto volume
+        try:
+            from scapy.all import conf
+            conf.bufsize = 1024 * 1024 * 32  # 32 MB
+        except Exception:
+            pass
         while self._rodando:
             try:
                 from scapy.all import AsyncSniffer
