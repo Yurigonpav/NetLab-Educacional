@@ -1,15 +1,5 @@
 # interface/painel_eventos.py
 # Painel do Modo Análise — v7.0  (redesign visual minimalista)
-#
-# MUDANÇAS v7.0:
-#   - Visual completamente refeito: minimalista, compacto e sem poluição visual
-#   - Topbar comprimida (84 px → 68 px) — badges e busca em faixa única quando possível
-#   - _ItemWidget reduzido de 68 → 56 px com layout mais denso e limpo
-#   - Cabeçalho de detalhe compactado; padding e espaçamentos revistos
-#   - Barra de abas 40 → 32 px; rodapé 28 → 24 px
-#   - Scrollbar ultra-fina (4 px) com transição suave
-#   - resizeEvent adapta padding e texto do rodapé de forma responsiva
-#   - API pública idêntica à v6.1 (adicionar_evento, limpar, atualizar_stats)
 
 from collections import defaultdict, deque
 from html import escape
