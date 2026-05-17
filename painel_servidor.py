@@ -8,6 +8,7 @@
 # Todos os dados sao descartados ao encerrar o servidor — sem persistencia em disco.
 
 import json
+import ipaddress
 import sqlite3
 import threading
 import time
@@ -16,6 +17,8 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from typing import Optional
 from urllib.parse import parse_qs
+import urllib.error
+import urllib.request
 import socket
 import subprocess
 
@@ -24,10 +27,16 @@ from PyQt6.QtWidgets import (
     QPushButton, QFrame, QTableWidget,
     QTableWidgetItem, QHeaderView, QSplitter,
     QTextEdit, QGroupBox, QGridLayout,
-    QProgressBar, QMessageBox
+    QProgressBar, QMessageBox, QComboBox,
+    QCheckBox, QSpinBox, QSizePolicy, QDialog
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QImage, QPixmap, QColor, QPainter
+
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 
 # ===========================================================================
@@ -1126,6 +1135,8 @@ class HandlerVulneravel(BaseHTTPRequestHandler):
             ("/register", "Registrar"),
             ("/comentarios", "Coment&aacute;rios"),
         )
+        if usuario:
+            links = links + (("/alterar-senha", "Alterar senha"),)
         nav_links = "".join(
             f'<a class="nav-link{" active" if caminho_atual == href else ""}" '
             f'href="{href}"{" aria-current=page" if caminho_atual == href else ""}>{rotulo}</a>'
@@ -1133,6 +1144,7 @@ class HandlerVulneravel(BaseHTTPRequestHandler):
         )
         sessao_html = (
             f'<div class="nav-session">Sess&atilde;o ativa: <strong>{usuario}</strong> '
+            f'<a href="/alterar-senha">Senha</a> '
             f'<a href="/logout">Sair</a></div>'
             if usuario else
             '<div class="nav-session">Servidor local pronto para uso</div>'
@@ -1209,12 +1221,21 @@ class HandlerVulneravel(BaseHTTPRequestHandler):
             corpo = self._rota_inicial(usuario)
             self._enviar_html(200, corpo)
 
+        elif caminho in ("/health", "/status"):
+            self._enviar_texto(200, "OK")
+            self._registrar(ip_cliente, "GET", caminho, 0, ts_inicio)
+            return
+
         elif caminho == "/login":
             corpo = self._rota_formulario_login()
             self._enviar_html(200, corpo)
         
         elif caminho == "/register":
             corpo = self._rota_registro()
+            self._enviar_html(200, corpo)
+
+        elif caminho == "/alterar-senha":
+            corpo = self._rota_alterar_senha(usuario=usuario)
             self._enviar_html(200, corpo)
 
         elif caminho == "/logout":
@@ -1313,6 +1334,10 @@ class HandlerVulneravel(BaseHTTPRequestHandler):
 
         elif caminho == "/register":
             corpo = self._processar_registro(params, ip_cliente)
+            self._enviar_html(200, corpo)
+
+        elif caminho == "/alterar-senha":
+            corpo = self._processar_alterar_senha(params, ip_cliente)
             self._enviar_html(200, corpo)
 
         elif caminho == "/comentarios":
@@ -1486,6 +1511,184 @@ class HandlerVulneravel(BaseHTTPRequestHandler):
             return self._rota_inicial(nome_usuario), f"sessao={token}; Path=/"
 
         return self._rota_formulario_login("Usuário ou senha incorretos.", "erro"), None
+
+    def _rota_alterar_senha(
+        self,
+        usuario: str = "",
+        mensagem: str = "",
+        tipo_msg: str = "",
+    ) -> str:
+        usuario = usuario or self._usuario_logado()
+        bloco_msg = ""
+        if mensagem:
+            classe = "aviso" if tipo_msg == "erro" else "sucesso"
+            papel = "alert" if tipo_msg == "erro" else "status"
+            bloco_msg = f'<div class="{classe}" role="{papel}" aria-live="polite">{mensagem}</div>'
+
+        if not usuario:
+            conteudo = f"""
+            <section class="auth-grid">
+                <div class="card">
+                    <span class="eyebrow">Conta</span>
+                    <h1>Alterar senha</h1>
+                    <p class="lead compact-lead">
+                        Para trocar a senha, primeiro entre com uma conta ativa.
+                    </p>
+                </div>
+                <div class="card">
+                    <span class="eyebrow">Login necess&aacute;rio</span>
+                    <h2>Acesse sua conta</h2>
+                    <div class="info">A troca de senha depende da sess&atilde;o do usu&aacute;rio.</div>
+                    <div class="actions" style="margin-top:18px;">
+                        <a class="primary-link" href="/login">Entrar</a>
+                        <a class="ghost-link" href="/register">Criar conta</a>
+                    </div>
+                </div>
+            </section>
+            """
+            return self._pagina_base("Alterar senha", conteudo)
+
+        conteudo = f"""
+        <section class="auth-grid">
+            <div class="card">
+                <span class="eyebrow">Conta ativa</span>
+                <h1>Alterar senha</h1>
+                <p class="lead compact-lead">
+                    Atualize a senha da conta <strong>{usuario}</strong> sem sair da
+                    sess&atilde;o atual do servidor local.
+                </p>
+                <ul class="meta-list" style="margin-top:18px;">
+                    <li>A senha atual &eacute; conferida antes da altera&ccedil;&atilde;o.</li>
+                    <li>A nova senha segue a regra do cadastro: apenas n&uacute;meros.</li>
+                    <li>O banco fica em mem&oacute;ria e reinicia quando o servidor para.</li>
+                </ul>
+            </div>
+            <div class="card">
+                <span class="eyebrow">Seguran&ccedil;a da conta</span>
+                <h2>Definir nova senha</h2>
+                <p class="helper-line" style="margin-top:0; margin-bottom:16px;">
+                    Digite a senha atual e confirme a nova senha para concluir.
+                </p>
+                {bloco_msg}
+                <form method="POST" action="/alterar-senha" data-enhanced-form>
+                    <div class="field">
+                        <div class="field-label-row">
+                            <label for="senha-atual">Senha atual</label>
+                            <span class="field-required">obrigat&oacute;rio</span>
+                        </div>
+                        <div class="input-shell">
+                            <input id="senha-atual" type="password" name="senha_atual" required autocomplete="current-password" placeholder="Digite sua senha atual" aria-describedby="senha-atual-hint">
+                            <button class="password-toggle" type="button" data-password-toggle="senha-atual" aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+                        </div>
+                        <div id="senha-atual-hint" class="field-hint">Use a senha atualmente cadastrada para esta conta.</div>
+                    </div>
+                    <div class="field">
+                        <div class="field-label-row">
+                            <label for="nova-senha">Nova senha (apenas n&uacute;meros)</label>
+                            <span class="field-required">obrigat&oacute;rio</span>
+                        </div>
+                        <div class="input-shell">
+                            <input id="nova-senha" type="password" name="nova_senha" required autocomplete="new-password" inputmode="numeric" pattern="[0-9]*" placeholder="Use apenas n&uacute;meros" aria-describedby="nova-senha-hint nova-senha-rules" data-password-rules>
+                            <button class="password-toggle" type="button" data-password-toggle="nova-senha" aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+                        </div>
+                        <div id="nova-senha-hint" class="field-hint">A regra aparece enquanto voc&ecirc; digita.</div>
+                        <ul id="nova-senha-rules" class="validation-list" aria-live="polite">
+                            <li class="validation-item" data-rule="digits">Apenas n&uacute;meros.</li>
+                        </ul>
+                        <div class="password-meter" aria-hidden="true"><span data-password-meter></span></div>
+                    </div>
+                    <div class="field">
+                        <div class="field-label-row">
+                            <label for="confirmar-nova-senha">Confirmar nova senha</label>
+                            <span class="field-required">obrigat&oacute;rio</span>
+                        </div>
+                        <div class="input-shell">
+                            <input id="confirmar-nova-senha" type="password" name="confirmar" required autocomplete="new-password" inputmode="numeric" pattern="[0-9]*" placeholder="Repita a nova senha" aria-describedby="confirmar-nova-senha-status" data-password-confirm>
+                            <button class="password-toggle" type="button" data-password-toggle="confirmar-nova-senha" aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+                        </div>
+                        <div id="confirmar-nova-senha-status" class="field-hint match-status" data-match-status aria-live="polite">Repita a senha para confirmar.</div>
+                    </div>
+                    <div class="form-actions">
+                        <input type="submit" value="Alterar senha" data-loading-label="Alterando...">
+                        <span class="form-note">A sess&atilde;o atual permanece ativa ap&oacute;s a altera&ccedil;&atilde;o.</span>
+                    </div>
+                </form>
+            </div>
+        </section>
+        """
+        return self._pagina_base("Alterar senha", conteudo)
+
+    def _processar_alterar_senha(self, params: dict, ip_cliente: str) -> str:
+        usuario = self._usuario_logado()
+        if not usuario:
+            return self._rota_alterar_senha(
+                mensagem="Fa&ccedil;a login antes de alterar a senha.",
+                tipo_msg="erro",
+            )
+
+        senha_atual = params.get("senha_atual", [""])[0]
+        nova_senha  = params.get("nova_senha",  [""])[0]
+        confirmar   = params.get("confirmar",   [""])[0]
+
+        if not senha_atual or not nova_senha or not confirmar:
+            return self._rota_alterar_senha(
+                usuario=usuario,
+                mensagem="Preencha todos os campos.",
+                tipo_msg="erro",
+            )
+        if not nova_senha.isdigit():
+            return self._rota_alterar_senha(
+                usuario=usuario,
+                mensagem="A nova senha deve conter apenas n&uacute;meros.",
+                tipo_msg="erro",
+            )
+        if nova_senha != confirmar:
+            return self._rota_alterar_senha(
+                usuario=usuario,
+                mensagem="As senhas n&atilde;o conferem.",
+                tipo_msg="erro",
+            )
+
+        linhas, _, erro = banco_servidor.consultar_seguro(
+            "SELECT password FROM users WHERE username = ?",
+            (usuario,),
+        )
+        if erro or not linhas:
+            return self._rota_alterar_senha(
+                usuario=usuario,
+                mensagem="N&atilde;o foi poss&iacute;vel localizar a conta ativa.",
+                tipo_msg="erro",
+            )
+        if linhas[0][0] != senha_atual:
+            sinais_servidor.alerta_emitido.emit(
+                f"[CONTA] Tentativa de troca de senha com senha atual incorreta "
+                f"para {usuario} a partir de {ip_cliente}"
+            )
+            return self._rota_alterar_senha(
+                usuario=usuario,
+                mensagem="Senha atual incorreta.",
+                tipo_msg="erro",
+            )
+
+        sucesso, _ = banco_servidor.modificar_seguro(
+            "UPDATE users SET password = ? WHERE username = ?",
+            (nova_senha, usuario),
+        )
+        if not sucesso:
+            return self._rota_alterar_senha(
+                usuario=usuario,
+                mensagem="Erro ao atualizar a senha. Tente novamente.",
+                tipo_msg="erro",
+            )
+
+        sinais_servidor.alerta_emitido.emit(
+            f"[CONTA] Senha alterada para usuario '{usuario}' a partir de {ip_cliente}"
+        )
+        return self._rota_alterar_senha(
+            usuario=usuario,
+            mensagem="Senha alterada com sucesso.",
+            tipo_msg="sucesso",
+        )
 
     def _rota_produtos(self, params: dict) -> str:
         produto_id = params.get("id", [""])[0].strip()
@@ -2009,6 +2212,16 @@ class HandlerVulneravel(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(corpo_bytes)
 
+    def _enviar_texto(self, status: int, texto: str):
+        """Envia uma resposta de texto simples para diagnostico HTTP."""
+        corpo_bytes = texto.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(corpo_bytes)))
+        self.end_headers()
+        self.wfile.write(corpo_bytes)
+
     def _redirecionar(self, destino: str):
         """Envia um redirect HTTP 302."""
         self.send_response(302)
@@ -2071,19 +2284,20 @@ class ServidorHTTPMultithread(ThreadingMixIn, HTTPServer):
 class ThreadServidor(threading.Thread):
     """Thread dedicada ao servidor HTTP — nao bloqueia a interface Qt."""
 
-    def __init__(self, porta: int):
+    def __init__(self, porta: int, host: str = "0.0.0.0"):
         super().__init__(daemon=True)
-        self.porta   = porta
+        self.porta = porta
+        self.host  = host or "0.0.0.0"
         self._server: Optional[HTTPServer] = None
 
     def run(self):
         """Inicia o servidor e aguarda requisicoes."""
         try:
             self._server = ServidorHTTPMultithread(
-                ("0.0.0.0", self.porta), HandlerVulneravel
+                (self.host, self.porta), HandlerVulneravel
             )
             sinais_servidor.status_alterado.emit(
-                f"Servidor vulneravel iniciado na porta {self.porta}"
+                f"Servidor vulneravel iniciado em {self.host}:{self.porta}"
             )
             self._server.serve_forever()
         except Exception as erro:
@@ -2121,6 +2335,12 @@ class PainelServidor(QWidget):
         self._contador_por_segundo = 0
         self._clientes_unicos: set = set()
         self._porta_atual          = 8080
+        self._bind_host_atual      = "0.0.0.0"
+        self._ip_lan_atual         = self._obter_ip_local()
+        self._url_local_atual      = ""
+        self._url_lan_atual        = ""
+        self._perfil_rede_atual    = "Desconhecido"
+        self._ultimo_firewall_erro = ""
 
         self._timer_metricas = QTimer()
         self._timer_metricas.timeout.connect(self._atualizar_metricas_por_segundo)
@@ -2146,7 +2366,7 @@ class PainelServidor(QWidget):
 
         splitter.addWidget(self._criar_painel_controles())
         splitter.addWidget(self._criar_painel_requisicoes())
-        splitter.setSizes([350, 730])
+        splitter.setSizes([430, 690])
 
     def _criar_painel_controles(self) -> QWidget:
         """Painel esquerdo: configuracao, status e metricas."""
@@ -2172,11 +2392,23 @@ class PainelServidor(QWidget):
         )
         layout = QGridLayout(grp)
 
+        lbl_host = QLabel("Bind:")
+        lbl_host.setStyleSheet("color: #ecf0f1; font-size: 11px;")
+        layout.addWidget(lbl_host, 0, 0)
+
+        self.combo_bind = QComboBox()
+        self.combo_bind.setMinimumHeight(26)
+        self.combo_bind.setStyleSheet(
+            "QComboBox { background: #0d1a2a; color: #ecf0f1; "
+            "border: 1px solid #3498DB; border-radius: 4px; padding: 3px 6px; }"
+        )
+        self._preencher_interfaces_bind()
+        layout.addWidget(self.combo_bind, 0, 1)
+
         lbl_porta = QLabel("Porta:")
         lbl_porta.setStyleSheet("color: #ecf0f1; font-size: 11px;")
-        layout.addWidget(lbl_porta, 0, 0)
+        layout.addWidget(lbl_porta, 1, 0)
 
-        # Controle de porta com botoes +/-
         cont_porta = QWidget()
         hbox_porta = QHBoxLayout(cont_porta)
         hbox_porta.setContentsMargins(0, 0, 0, 0)
@@ -2186,26 +2418,44 @@ class PainelServidor(QWidget):
         btn_menos.clicked.connect(lambda: self._ajustar_porta(-1))
         hbox_porta.addWidget(btn_menos)
 
-        self.lbl_porta = QLabel(str(self._porta_atual))
-        self.lbl_porta.setFixedSize(52, 25)
-        self.lbl_porta.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_porta.setStyleSheet(
-            "background: #0d1a2a; color: #ecf0f1; border: 1px solid #3498DB;"
-            "border-radius: 4px; font-size: 12px; font-weight: bold;"
+        self.spin_porta = QSpinBox()
+        self.spin_porta.setRange(1, 65535)
+        self.spin_porta.setValue(self._porta_atual)
+        self.spin_porta.setFixedSize(76, 25)
+        self.spin_porta.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spin_porta.setStyleSheet(
+            "QSpinBox { background: #0d1a2a; color: #ecf0f1; border: 1px solid #3498DB;"
+            "border-radius: 4px; font-size: 12px; font-weight: bold; }"
+            "QSpinBox::up-button { width: 0px; border: none; }"
+            "QSpinBox::down-button { width: 0px; border: none; }"
         )
-        hbox_porta.addWidget(self.lbl_porta)
+        self.spin_porta.valueChanged.connect(self._ao_porta_editada)
+        hbox_porta.addWidget(self.spin_porta)
 
         btn_mais = self._criar_botao_controle("+", "#3498DB", 18, 18)
         btn_mais.clicked.connect(lambda: self._ajustar_porta(+1))
         hbox_porta.addWidget(btn_mais)
 
-        layout.addWidget(cont_porta, 0, 1)
+        layout.addWidget(cont_porta, 1, 1)
+
+        self.chk_firewall = QCheckBox("Criar regra no Firewall do Windows")
+        self.chk_firewall.setChecked(True)
+        self.chk_firewall.setStyleSheet("color: #bdc3c7; font-size: 10px;")
+        layout.addWidget(self.chk_firewall, 2, 0, 1, 2)
+
+        lbl_bind_info = QLabel(
+            "127.0.0.1 = apenas este PC | 0.0.0.0 = rede inteira | "
+            "192.168.x.x = interface especifica"
+        )
+        lbl_bind_info.setWordWrap(True)
+        lbl_bind_info.setStyleSheet("color: #7f8c8d; font-size: 9px;")
+        layout.addWidget(lbl_bind_info, 3, 0, 1, 2)
 
         self.btn_iniciar = QPushButton("Iniciar Servidor")
         self.btn_iniciar.setObjectName("botao_captura")
         self.btn_iniciar.setMinimumHeight(30)
         self.btn_iniciar.clicked.connect(self._alternar_servidor)
-        layout.addWidget(self.btn_iniciar, 1, 0, 1, 2)
+        layout.addWidget(self.btn_iniciar, 4, 0, 1, 2)
 
         return grp
 
@@ -2214,20 +2464,24 @@ class PainelServidor(QWidget):
         grp = QGroupBox("Status do Servidor")
         grp.setStyleSheet(
             "QGroupBox { border: 1px solid #1e3a5f; border-radius: 6px; "
-            "margin-top: 2px; font-weight: bold; color: #bdc3c7; }"
+            "margin-top: 12px; font-weight: bold; color: #bdc3c7; }"
             "QGroupBox::title { subcontrol-origin: margin; padding: 0 3px; }"
         )
         layout = QVBoxLayout(grp)
+        layout.setContentsMargins(8, 16, 8, 8)
+        layout.setSpacing(8)
 
         self.lbl_status = QLabel("Servidor parado")
         self.lbl_status.setStyleSheet(
             "color: #E74C3C; font-weight: bold; font-size: 11px;"
         )
+        self.lbl_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         layout.addWidget(self.lbl_status)
 
         self.lbl_endereco = QTextEdit()
         self.lbl_endereco.setReadOnly(True)
-        self.lbl_endereco.setMaximumHeight(55)
+        self.lbl_endereco.setMaximumHeight(52)
+        self.lbl_endereco.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.lbl_endereco.setStyleSheet(
             "color: #3498DB; font-family: Consolas; font-size: 11px;"
             "background: #0d1a2a; border: 1px solid #1e3a5f; border-radius: 4px; padding: 6px;"
@@ -2235,13 +2489,41 @@ class PainelServidor(QWidget):
         self.lbl_endereco.setText("---")
         layout.addWidget(self.lbl_endereco)
 
-        lbl_instr = QLabel(
-            "Acesse o endereco acima de qualquer\n"
-            "dispositivo na mesma rede Wi-Fi."
+        lay_botoes = QHBoxLayout()
+        lay_botoes.setContentsMargins(0, 4, 0, 4)
+        lay_botoes.setSpacing(8)
+
+        self.btn_exibir_qr = QPushButton("Exibir QR Code")
+        self.btn_exibir_qr.setMinimumHeight(28)
+        self.btn_exibir_qr.setEnabled(False)  # Começa desativado até iniciar o servidor
+        self.btn_exibir_qr.clicked.connect(self._abrir_modal_qr)
+        lay_botoes.addWidget(self.btn_exibir_qr)
+
+        self.btn_diagnostico = QPushButton("Reexecutar diagnostico")
+        self.btn_diagnostico.setMinimumHeight(28)
+        self.btn_diagnostico.clicked.connect(self._executar_diagnostico_laboratorio)
+        lay_botoes.addWidget(self.btn_diagnostico)
+
+        layout.addLayout(lay_botoes)
+
+        self.txt_diagnostico = QTextEdit()
+        self.txt_diagnostico.setReadOnly(True)
+        self.txt_diagnostico.setMinimumHeight(120)
+        self.txt_diagnostico.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.txt_diagnostico.setStyleSheet(
+            "QTextEdit { background: #07101c; color: #bdc3c7; "
+            "border: 1px solid #1e3a5f; border-radius: 4px; "
+            "padding: 6px; font-family: Consolas; font-size: 9px; }"
         )
-        lbl_instr.setStyleSheet("color: #7f8c8d; font-size: 10px;")
-        lbl_instr.setWordWrap(True)
-        layout.addWidget(lbl_instr)
+        self.txt_diagnostico.setText(
+            "Modo laboratorio restrito aguardando inicio do servidor.\n"
+            "- O teste usa HTTP real em /health, nao ping/ICMP.\n"
+            "- Inicie o servidor para gerar URLs, QR Code e diagnostico.\n\n"
+            "Use a URL LAN ou o QR Code no celular. Se a rede institucional "
+            "tiver isolamento de clientes, sera necessario hotspot, roteador "
+            "proprio de laboratorio ou VLAN liberada."
+        )
+        layout.addWidget(self.txt_diagnostico)
 
         return grp
 
@@ -2401,12 +2683,42 @@ class PainelServidor(QWidget):
     def _ajustar_porta(self, delta: int):
         """Ajusta o numero da porta dentro dos limites permitidos."""
         nova_porta = self._porta_atual + delta
-        if 1024 <= nova_porta <= 65535:
+        if 1 <= nova_porta <= 65535:
             self._porta_atual = nova_porta
-            self.lbl_porta.setText(str(nova_porta))
+            self.spin_porta.setValue(nova_porta)
+
+    def _ao_porta_editada(self, porta: int):
+        """Atualiza a porta configurada quando o usuario digita manualmente."""
+        self._porta_atual = int(porta)
 
     def _iniciar_servidor(self):
         """Inicia o servidor HTTP e o banco de dados em memoria."""
+        self._bind_host_atual = self._bind_host_selecionado()
+        self._ip_lan_atual = self._obter_ip_local()
+        porta_original = self._porta_atual
+
+        if self._porta_em_uso(self._porta_atual, self._bind_host_atual):
+            sugestao = self._sugerir_porta()
+            if sugestao:
+                self._porta_atual = sugestao
+                self.spin_porta.setValue(sugestao)
+                self._adicionar_alerta(
+                    "AVISO",
+                    f"Porta {porta_original} ocupada por outro processo. "
+                    f"Usando automaticamente a porta {sugestao}."
+                )
+            else:
+                self.lbl_status.setText("Porta ocupada")
+                self.lbl_status.setStyleSheet(
+                    "color: #E74C3C; font-weight: bold; font-size: 11px;"
+                )
+                self._adicionar_alerta(
+                    "CRITICO",
+                    f"Porta {porta_original} ocupada e nenhuma alternativa "
+                    "automatica (8081, 8000, 5000) esta disponivel."
+                )
+                return
+
         # Reinicializa o banco — limpa todos os dados da sessao anterior
         banco_servidor.inicializar()
 
@@ -2420,21 +2732,30 @@ class PainelServidor(QWidget):
         self._clientes_unicos      = set()
         self._contador_por_segundo = 0
 
-        # Cria regra de entrada no Firewall do Windows antes de iniciar o servidor
-        try:
-            ok = self._adicionar_regra_firewall(self._porta_atual)
-            if not ok:
+        if self.chk_firewall.isChecked():
+            try:
+                ok = self._adicionar_regra_firewall(self._porta_atual)
+                if not ok:
+                    detalhe = self._ultimo_firewall_erro or "sem detalhe retornado pelo netsh"
+                    self._adicionar_alerta(
+                        "AVISO",
+                        f"Nao foi possivel criar regra de firewall para a porta "
+                        f"{self._porta_atual}. Execute como Administrador ou crie "
+                        f"uma regra TCP de entrada manualmente. Detalhe: {detalhe[:140]}"
+                    )
+            except Exception as exc:
                 self._adicionar_alerta(
                     "AVISO",
-                    f"Não foi possível criar regra de firewall para a porta {self._porta_atual}. Verifique privilégios de administrador."
+                    f"Falha ao tentar criar regra de firewall para a porta "
+                    f"{self._porta_atual}: {exc}"
                 )
-        except Exception:
+        else:
             self._adicionar_alerta(
                 "AVISO",
-                f"Falha ao tentar criar regra de firewall para a porta {self._porta_atual}."
+                "Criacao automatica de regra de firewall desativada pelo usuario."
             )
 
-        self._thread_servidor = ThreadServidor(self._porta_atual)
+        self._thread_servidor = ThreadServidor(self._porta_atual, self._bind_host_atual)
         self._thread_servidor.start()
         self._servidor_ativo = True
 
@@ -2442,21 +2763,21 @@ class PainelServidor(QWidget):
         self.btn_iniciar.setObjectName("botao_parar")
         self._repolir(self.btn_iniciar)
 
-        ip_local = self._obter_ip_local()
+        ip_local = self._ip_lan_atual
         self.lbl_status.setText("Servidor ativo")
         self.lbl_status.setStyleSheet(
             "color: #2ECC71; font-weight: bold; font-size: 11px;"
         )
-        self.lbl_endereco.setText(
-            f"http://{ip_local}:{self._porta_atual}/"
-        )
+        self._atualizar_urls_qr()
 
         self._timer_metricas.start(1000)
         self._adicionar_alerta(
             "INFO",
             f"Servidor vulneravel iniciado em "
-            f"http://{ip_local}:{self._porta_atual}/ — banco SQLite em memoria criado"
+            f"{self._bind_host_atual}:{self._porta_atual}. "
+            f"URL LAN: http://{ip_local}:{self._porta_atual}/ — banco SQLite em memoria criado"
         )
+        QTimer.singleShot(700, self._executar_diagnostico_laboratorio)
 
     def _parar_servidor(self):
         """Para o servidor HTTP e descarta o banco de dados em memoria."""
@@ -2502,6 +2823,15 @@ class PainelServidor(QWidget):
             "color: #E74C3C; font-weight: bold; font-size: 11px;"
         )
         self.lbl_endereco.setText("---")
+        self.btn_exibir_qr.setEnabled(False)
+        self.txt_diagnostico.setText(
+            "Modo laboratorio restrito aguardando inicio do servidor.\n"
+            "- O teste usa HTTP real em /health, nao ping/ICMP.\n"
+            "- Inicie o servidor para gerar URLs, QR Code e diagnostico.\n\n"
+            "Use a URL LAN ou o QR Code no celular. Se a rede institucional "
+            "tiver isolamento de clientes, sera necessario hotspot, roteador "
+            "proprio de laboratorio ou VLAN liberada."
+        )
         self.barra_carga.setValue(0)
         self.lbl_reqs_seg.setText("0")
         self._adicionar_alerta(
@@ -2608,15 +2938,341 @@ class PainelServidor(QWidget):
     # Utilitarios
     # -----------------------------------------------------------------------
 
+    def _preencher_interfaces_bind(self):
+        """Preenche o seletor de bind com 0.0.0.0 e IPs IPv4 locais."""
+        self.combo_bind.clear()
+        self.combo_bind.addItem("0.0.0.0 - todas interfaces (recomendado)", "0.0.0.0")
+        for ip, nome in self._listar_ips_locais():
+            self.combo_bind.addItem(f"{ip} - {nome}", ip)
+
+    def _bind_host_selecionado(self) -> str:
+        """Retorna o host de bind selecionado na interface."""
+        valor = self.combo_bind.currentData() if hasattr(self, "combo_bind") else None
+        return str(valor or "0.0.0.0")
+
+    @staticmethod
+    def _listar_ips_locais() -> list:
+        """Lista IPv4s locais uteis para bind/interface especifica."""
+        encontrados = []
+        vistos = set()
+        if psutil:
+            try:
+                for nome, addrs in psutil.net_if_addrs().items():
+                    for addr in addrs:
+                        if getattr(addr, "family", None) != socket.AF_INET:
+                            continue
+                        ip = getattr(addr, "address", "")
+                        try:
+                            ip_obj = ipaddress.ip_address(ip)
+                        except ValueError:
+                            continue
+                        if ip_obj.is_loopback or ip_obj.is_link_local or ip in vistos:
+                            continue
+                        vistos.add(ip)
+                        encontrados.append((ip, nome))
+            except Exception:
+                pass
+
+        if not encontrados:
+            try:
+                nome_host = socket.gethostname()
+                for ip in socket.gethostbyname_ex(nome_host)[2]:
+                    ip_obj = ipaddress.ip_address(ip)
+                    if not ip_obj.is_loopback and not ip_obj.is_link_local and ip not in vistos:
+                        vistos.add(ip)
+                        encontrados.append((ip, "interface local"))
+            except Exception:
+                pass
+        return encontrados
+
     @staticmethod
     def _obter_ip_local() -> str:
         """Obtém o IP local da interface de rede ativa."""
+        ips = PainelServidor._listar_ips_locais()
+        if ips:
+            return ips[0][0]
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as soquete:
                 soquete.connect(("8.8.8.8", 80))
                 return soquete.getsockname()[0]
         except Exception:
             return "127.0.0.1"
+
+    @staticmethod
+    def _porta_em_uso(porta: int, host: str = "0.0.0.0") -> bool:
+        """Verifica se a porta ja esta ocupada, sem depender de ping/ICMP."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.bind((host or "0.0.0.0", int(porta)))
+                return False
+        except OSError:
+            return True
+
+    def _sugerir_porta(self) -> int:
+        """Escolhe automaticamente uma porta alternativa comum para laboratorio."""
+        candidatos = []
+        if self._porta_atual < 65535:
+            candidatos.append(self._porta_atual + 1)
+        candidatos.extend([8081, 8000, 5000])
+        vistos = set()
+        for porta in candidatos:
+            if porta in vistos or not (1 <= int(porta) <= 65535):
+                continue
+            vistos.add(porta)
+            if not self._porta_em_uso(int(porta), self._bind_host_atual):
+                return int(porta)
+        return 0
+
+    def _atualizar_urls_qr(self):
+        """Atualiza URLs local/LAN e QR Code para acesso por celular."""
+        porta = self._porta_atual
+        self._ip_lan_atual = (
+            self._bind_host_atual
+            if self._bind_host_atual not in ("", "0.0.0.0")
+            else self._obter_ip_local()
+        )
+        self._url_local_atual = f"http://127.0.0.1:{porta}"
+        self._url_lan_atual = f"http://{self._ip_lan_atual}:{porta}"
+        self.lbl_endereco.setHtml(
+            f"<div style='line-height: 140%;'>"
+            f"<span style='color: #bdc3c7; font-weight: bold;'>URL local:</span> <span style='color: #3498DB;'>{self._url_local_atual}</span><br>"
+            f"<span style='color: #bdc3c7; font-weight: bold;'>URL LAN:</span>&nbsp;&nbsp; <span style='color: #3498DB;'>{self._url_lan_atual}</span>"
+            f"</div>"
+        )
+        self.btn_exibir_qr.setEnabled(True)
+
+    def _abrir_modal_qr(self, event=None):
+        """Abre um modal com o QR Code ampliado para escaneamento."""
+        if not getattr(self, '_servidor_ativo', False) or not getattr(self, '_url_lan_atual', None):
+            return
+
+        modal = QDialog(self)
+        modal.setWindowTitle("Acesso pelo Celular")
+        modal.setFixedSize(450, 500)
+        modal.setStyleSheet("QDialog { background: #0a0f1a; border: 1px solid #1e3a5f; }")
+
+        layout = QVBoxLayout(modal)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(15)
+
+        lbl_titulo = QLabel("Escaneie o QR Code abaixo:")
+        lbl_titulo.setStyleSheet("color: #ecf0f1; font-size: 16px; font-weight: bold;")
+        lbl_titulo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl_titulo)
+
+        lbl_img = QLabel()
+        lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_img.setFixedSize(330, 330)
+        lbl_img.setStyleSheet("background: #ffffff; border-radius: 8px; padding: 15px;")
+        
+        pixmap = self._gerar_qr_pixmap(self._url_lan_atual, tamanho=300)
+        if pixmap:
+            lbl_img.setPixmap(pixmap)
+        else:
+            lbl_img.setText("QR Code indisponivel.")
+            lbl_img.setStyleSheet("color: #E74C3C; font-size: 14px;")
+            
+        layout.addWidget(lbl_img)
+
+        lbl_url = QLabel(self._url_lan_atual)
+        lbl_url.setStyleSheet("color: #3498DB; font-size: 15px; font-family: Consolas;")
+        lbl_url.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl_url)
+
+        btn_fechar = QPushButton("Fechar")
+        btn_fechar.setFixedSize(120, 35)
+        btn_fechar.setStyleSheet(
+            "QPushButton { background: #3498DB; color: white; border-radius: 4px; font-weight: bold; font-size: 12px; }"
+            "QPushButton:hover { background: #2980B9; }"
+        )
+        btn_fechar.clicked.connect(modal.accept)
+        
+        lay_btn = QHBoxLayout()
+        lay_btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay_btn.addWidget(btn_fechar)
+        layout.addLayout(lay_btn)
+
+        modal.exec()
+
+    @staticmethod
+    def _gerar_qr_pixmap(texto: str, tamanho: int = 148) -> Optional[QPixmap]:
+        """Gera QR Code local usando qrcode + pintura em QImage, com fallback para API web."""
+        try:
+            import qrcode
+            qr = qrcode.QRCode(border=2)
+            qr.add_data(texto)
+            qr.make(fit=True)
+            matriz = qr.get_matrix()
+        except Exception:
+            try:
+                import urllib.request
+                import urllib.parse
+                url = f"https://api.qrserver.com/v1/create-qr-code/?size={tamanho}x{tamanho}&data={urllib.parse.quote(texto)}"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=3.0) as response:
+                    data = response.read()
+                    pixmap = QPixmap()
+                    pixmap.loadFromData(data)
+                    return pixmap
+            except Exception:
+                return None
+
+        modulos = len(matriz)
+        escala = max(2, tamanho // max(1, modulos))
+        lado = modulos * escala
+        imagem = QImage(lado, lado, QImage.Format.Format_RGB32)
+        imagem.fill(QColor("#ffffff"))
+
+        pintor = QPainter(imagem)
+        pintor.fillRect(0, 0, lado, lado, QColor("#ffffff"))
+        preto = QColor("#06111c")
+        for y, linha in enumerate(matriz):
+            for x, ligado in enumerate(linha):
+                if ligado:
+                    pintor.fillRect(x * escala, y * escala, escala, escala, preto)
+        pintor.end()
+        return QPixmap.fromImage(imagem).scaled(
+            tamanho, tamanho,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+
+    @staticmethod
+    def _testar_health_http(url: str) -> tuple[bool, str]:
+        """Testa conectividade por HTTP real em /health. Nao usa ping/ICMP."""
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "NetLab-Diagnostico/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as resposta:
+                corpo = resposta.read(32).decode("utf-8", errors="ignore").strip()
+                if resposta.status == 200 and corpo == "OK":
+                    return True, "OK"
+                return False, f"HTTP {resposta.status} resposta={corpo!r}"
+        except urllib.error.URLError as exc:
+            return False, str(getattr(exc, "reason", exc))
+        except Exception as exc:
+            return False, str(exc)
+
+    @staticmethod
+    def _detectar_perfil_rede_windows() -> str:
+        """Detecta o perfil de rede do Windows: Publica, Privada ou Dominio."""
+        try:
+            comando = (
+                "$p=Get-NetConnectionProfile | "
+                "Where-Object {$_.IPv4Connectivity -ne 'Disconnected'} | "
+                "Select-Object -First 1; "
+                "if ($p) { $p.NetworkCategory }"
+            )
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-Command", comando],
+                capture_output=True, timeout=4, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            bruto = (proc.stdout or "").strip()
+            mapa = {
+                "Public": "Pública",
+                "Private": "Privada",
+                "DomainAuthenticated": "Domínio",
+            }
+            return mapa.get(bruto, bruto or "Desconhecido")
+        except Exception:
+            return "Desconhecido"
+
+    def _executar_diagnostico_laboratorio(self):
+        """Executa checklist do modo laboratorio restrito com testes HTTP reais."""
+        if not self._servidor_ativo:
+            self.txt_diagnostico.setText(
+                "Servidor parado.\n"
+                "- Inicie o servidor para testar /health.\n"
+                "- O diagnostico nao usa ping porque muitas redes bloqueiam ICMP."
+            )
+            return
+
+        self._atualizar_urls_qr()
+        perfil = self._detectar_perfil_rede_windows()
+        self._perfil_rede_atual = perfil
+        url_local_health = f"{self._url_local_atual}/health"
+        url_lan_health = f"{self._url_lan_atual}/health"
+        local_ok, local_msg = self._testar_health_http(url_local_health)
+        lan_ok, lan_msg = self._testar_health_http(url_lan_health)
+        fw_ok = self._verificar_regra_firewall(self._porta_atual)
+
+        if local_ok and lan_ok:
+            interpretacao = (
+                "Servidor acessivel externamente pela URL LAN e tambem localmente "
+                "neste computador."
+            )
+            cor = "INFO"
+        elif local_ok and not lan_ok:
+            if self._bind_host_atual == "127.0.0.1":
+                interpretacao = (
+                    "Servidor ativo apenas localmente. Troque o bind para 0.0.0.0 "
+                    "para permitir acesso por outros dispositivos."
+                )
+            else:
+                interpretacao = (
+                    "Localhost funciona e LAN falha: provavel firewall do Windows, "
+                    "antivirus, bind incorreto ou politica de rede bloqueando conexoes."
+                )
+            cor = "AVISO"
+        elif not local_ok and lan_ok:
+            interpretacao = (
+                "URL LAN funciona, mas localhost falha. Isso pode ocorrer ao usar "
+                "bind em uma interface especifica. Acesso externo esta operacional."
+            )
+            cor = "INFO"
+        else:
+            interpretacao = (
+                "Ambos os testes falharam: servidor nao iniciou corretamente, "
+                "porta bloqueada/ocupada ou bind invalido."
+            )
+            cor = "CRITICO"
+
+        perfil_aviso = ""
+        if perfil == "Pública":
+            perfil_aviso = (
+                "\n! A rede atual esta configurada como Publica. O Windows pode "
+                "bloquear conexoes externas. Considere alterar para rede Privada "
+                "ou liberar a porta no firewall."
+            )
+
+        regra = (
+            f'netsh advfirewall firewall add rule name="NetLab Educacional - '
+            f'Servidor HTTP TCP {self._porta_atual}" dir=in action=allow '
+            f'protocol=TCP localport={self._porta_atual} profile=any'
+        )
+
+        checklist = (
+            "MODO LABORATORIO RESTRITO\n"
+            "----------------------------------------\n"
+            f"Bind selecionado: {self._bind_host_atual}\n"
+            f"IP detectado:     {self._ip_lan_atual}\n"
+            f"Porta utilizada:  {self._porta_atual}\n"
+            f"URL local:        {self._url_local_atual}\n"
+            f"URL LAN:          {self._url_lan_atual}\n"
+            f"QR Code:          gerado para a URL LAN\n"
+            f"Perfil Windows:   {perfil}{perfil_aviso}\n"
+            f"Firewall NetLab:  {'regra encontrada' if fw_ok else 'regra nao encontrada ou sem permissao'}\n\n"
+            "TESTES /health (HTTP real, sem ping)\n"
+            f"- localhost: {'OK' if local_ok else 'FALHOU'} ({local_msg})\n"
+            f"- LAN:       {'OK' if lan_ok else 'FALHOU'} ({lan_msg})\n\n"
+            "DIAGNOSTICO\n"
+            f"{interpretacao}\n\n"
+            "SE O CELULAR AINDA NAO ABRIR\n"
+            "- Use a URL LAN, nunca localhost no celular.\n"
+            "- Verifique se celular e PC estao na mesma rede/sub-rede.\n"
+            "- Redes institucionais podem usar AP Isolation, Client Isolation,\n"
+            "  bloqueio de VLAN ou Wi-Fi restritivo.\n"
+            "- Alternativas: hotspot do Windows, roteador proprio de laboratorio,\n"
+            "  rede separada ou VLAN liberada para comunicacao entre clientes.\n\n"
+            "CORRECAO MANUAL DO FIREWALL\n"
+            f"{regra}"
+        )
+        self.txt_diagnostico.setText(checklist)
+        self._adicionar_alerta(cor, interpretacao)
 
     @staticmethod
     def _repolir(widget):
@@ -2626,7 +3282,8 @@ class PainelServidor(QWidget):
 
     def _adicionar_regra_firewall(self, porta: int) -> bool:
         """Cria regra de entrada no Windows Firewall para a porta do servidor."""
-        nome_regra = f"NetLab-Servidor-{porta}"
+        nome_regra = f"NetLab Educacional - Servidor HTTP TCP {porta}"
+        self._ultimo_firewall_erro = ""
         try:
             # Remove regra anterior com mesmo nome (evita duplicatas ou regras corrompidas)
             subprocess.run(
@@ -2644,13 +3301,18 @@ class PainelServidor(QWidget):
                 capture_output=True, timeout=5, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
+            if proc.returncode != 0:
+                self._ultimo_firewall_erro = (
+                    (proc.stderr or proc.stdout or "").strip()
+                )
             return proc.returncode == 0
-        except Exception:
+        except Exception as exc:
+            self._ultimo_firewall_erro = str(exc)
             return False
 
     def _remover_regra_firewall(self, porta: int) -> bool:
         """Remove a regra criada ao parar o servidor."""
-        nome_regra = f"NetLab-Servidor-{porta}"
+        nome_regra = f"NetLab Educacional - Servidor HTTP TCP {porta}"
         try:
             proc = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "delete", "rule",
@@ -2664,7 +3326,7 @@ class PainelServidor(QWidget):
 
     def _verificar_regra_firewall(self, porta: int) -> bool:
         """Verifica se existe regra de firewall ativa para a porta do servidor."""
-        nome_regra = f"NetLab-Servidor-{porta}"
+        nome_regra = f"NetLab Educacional - Servidor HTTP TCP {porta}"
         try:
             proc = subprocess.run(
                 ["netsh", "advfirewall", "firewall", "show", "rule",

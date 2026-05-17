@@ -12,6 +12,7 @@
 #   - API pública idêntica à v6.1 (adicionar_evento, limpar, atualizar_stats)
 
 from collections import defaultdict, deque
+from html import escape
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -57,6 +58,8 @@ _PROTO_COR = {
     "ARP":              "#cf832a",
     "ICMP":             "#28b8a8",
     "TCP_SYN":          "#8b69c0",
+    "TCP_FIN":          "#6e86d6",
+    "TCP_RST":          "#d05a6a",
     "DHCP":             "#1c9c85",
     "SSH":              "#2e6eae",
     "FTP":              "#c44a86",
@@ -68,6 +71,7 @@ _PROTO_COR = {
 _PROTO_LABEL = {
     "HTTPS": "HTTPS", "HTTP": "HTTP",  "DNS": "DNS",
     "ARP":   "ARP",   "ICMP": "ICMP",  "TCP_SYN": "SYN",
+    "TCP_FIN": "FIN",  "TCP_RST": "RST",
     "DHCP":  "DHCP",  "SSH":  "SSH",   "FTP": "FTP",
     "SMB":   "SMB",   "RDP":  "RDP",   "NOVO_DISPOSITIVO": "NOVO",
 }
@@ -310,11 +314,11 @@ class _ItemWidget(QWidget):
 
         # Timestamp alinhado à direita
         lbl_ts = QLabel(evento.get("timestamp", ""))
-        lbl_ts.setFixedWidth(46)
+        lbl_ts.setFixedWidth(66)
         lbl_ts.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         lbl_ts.setStyleSheet(
-            f"color: {_DIM}; font-family: Consolas; font-size: 8px; "
-            f"padding-right: 10px; background: transparent;"
+            f"color: {_DIM}; font-family: Consolas; font-size: 9px; "
+            f"padding-right: 12px; padding-left: 4px; background: transparent;"
         )
         root.addWidget(lbl_ts)
 
@@ -413,6 +417,48 @@ class _MetaGrid(QFrame):
             ll.addWidget(lr)
             ll.addWidget(lv, 1)
             lay.addWidget(linha)
+
+
+class _AutoHeightTextBrowser(QTextBrowser):
+    """QTextBrowser sem rolagem interna: cresce conforme o documento renderizado."""
+
+    def __init__(self, min_h: int = 60, parent=None):
+        super().__init__(parent)
+        self._min_h = min_h
+        self._ajustando_altura = False
+        self.setOpenExternalLinks(False)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.document().contentsChanged.connect(self._ajustar_altura)
+
+    def setHtml(self, html: str):
+        super().setHtml(html)
+        QTimer.singleShot(0, self._ajustar_altura)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._ajustar_altura)
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+    def _ajustar_altura(self):
+        if self._ajustando_altura:
+            return
+        self._ajustando_altura = True
+        try:
+            largura = max(1, self.viewport().width())
+            self.document().setTextWidth(largura)
+            altura_doc = int(self.document().size().height())
+            margem_doc = int(self.document().documentMargin() * 2)
+            borda = self.frameWidth() * 2
+            altura = max(self._min_h, altura_doc + margem_doc + borda + 28)
+            self.setMinimumHeight(altura)
+            self.setMaximumHeight(altura)
+            self.verticalScrollBar().setValue(0)
+        finally:
+            self._ajustando_altura = False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -574,7 +620,8 @@ class PainelEventos(QWidget):
 
         protos = [
             "Todos", "HTTPS", "HTTP", "DNS", "ARP",
-            "ICMP", "TCP_SYN", "DHCP", "SSH", "FTP", "SMB", "RDP",
+            "ICMP", "TCP_SYN", "TCP_FIN", "TCP_RST",
+            "DHCP", "SSH", "FTP", "SMB", "RDP", "NOVO_DISPOSITIVO",
         ]
         for proto in protos:
             b = _Badge(proto)
@@ -599,8 +646,8 @@ class PainelEventos(QWidget):
 
     def _mk_painel_lista(self) -> QWidget:
         frame = QFrame()
-        frame.setMinimumWidth(220)
-        frame.setMaximumWidth(340)
+        frame.setMinimumWidth(240)
+        frame.setMaximumWidth(390)
         frame.setStyleSheet(f"""
             QFrame {{
                 background: {_BG2};
@@ -801,7 +848,10 @@ class PainelEventos(QWidget):
               <span class="proto" style="background:rgba(207,131,42,0.15); color:#cf832a; border:1px solid rgba(207,131,42,0.3);">ARP</span>
               <span class="proto" style="background:rgba(40,184,168,0.15); color:#28b8a8; border:1px solid rgba(40,184,168,0.3);">ICMP</span>
               <span class="proto" style="background:rgba(139,105,192,0.15); color:#8b69c0; border:1px solid rgba(139,105,192,0.3);">SYN</span>
+              <span class="proto" style="background:rgba(110,134,214,0.15); color:#6e86d6; border:1px solid rgba(110,134,214,0.3);">FIN</span>
+              <span class="proto" style="background:rgba(208,90,106,0.15); color:#d05a6a; border:1px solid rgba(208,90,106,0.3);">RST</span>
               <span class="proto" style="background:rgba(28,156,133,0.15); color:#1c9c85; border:1px solid rgba(28,156,133,0.3);">DHCP</span>
+              <span class="proto" style="background:rgba(207,165,40,0.15); color:#cfa528; border:1px solid rgba(207,165,40,0.3);">NOVO</span>
             </div>
           </div>
 
@@ -839,10 +889,8 @@ class PainelEventos(QWidget):
         </body>
         """
 
-        tb = QTextBrowser()
-        tb.setOpenExternalLinks(False)
+        tb = _AutoHeightTextBrowser(min_h=420)
         tb.setHtml(html)
-        tb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         tb.setStyleSheet(f"""
             QTextBrowser {{
                 background: {_BG};
@@ -850,8 +898,8 @@ class PainelEventos(QWidget):
                 padding: 0;
                 color: {_TEXTO};
             }}
-            {_SCROLL_SS}
         """)
+        tb._ajustar_altura()
         self._lay_c.insertWidget(0, tb)
 
     def _mk_header_detalhe(self) -> QFrame:
@@ -1043,7 +1091,7 @@ class PainelEventos(QWidget):
             return False
         if self._filtro_texto:
             campo = " ".join([
-                e.get("ip_origem",  ""),
+                e.get("ip_origem") or e.get("ip_envolvido", ""),
                 e.get("ip_destino", ""),
                 e.get("titulo",     ""),
                 e.get("dominio",    ""),
@@ -1135,7 +1183,7 @@ class PainelEventos(QWidget):
         titulo = (
             e.get("dominio")
             or e.get("titulo")
-            or f"{e.get('ip_origem', '')} → {e.get('ip_destino', '')}"
+            or f"{self._origem_pratica(e)} → {e.get('ip_destino', '')}"
         )
         if len(str(titulo)) > 72:
             titulo = str(titulo)[:70] + "…"
@@ -1144,8 +1192,9 @@ class PainelEventos(QWidget):
 
         # Linha de resumo compacta
         partes = []
-        if e.get("ip_origem"):
-            partes.append(e["ip_origem"])
+        origem_resumo = e.get("ip_origem") or e.get("ip_envolvido")
+        if origem_resumo:
+            partes.append(origem_resumo)
         if e.get("ip_destino"):
             partes.append(f"› {e['ip_destino']}")
         if e.get("tamanho"):
@@ -1156,7 +1205,7 @@ class PainelEventos(QWidget):
 
         self._det_resumo.setText("   ".join(partes) if partes else "")
         self._lbl_status.setText(
-            f"{tipo}  —  {e.get('ip_origem', '')} › {e.get('ip_destino', '')}"
+            f"{tipo}  —  {self._origem_pratica(e)} › {e.get('ip_destino', '')}"
         )
 
         # Limpa o conteúdo anterior (mantém o stretch no final)
@@ -1204,13 +1253,8 @@ class PainelEventos(QWidget):
         min_h: int = 60,
         max_h: int = 500,
     ) -> QTextBrowser:
-        """Cria um QTextBrowser estilizado para exibição de HTML formatado."""
-        tb = QTextBrowser()
-        tb.setOpenExternalLinks(False)
-        tb.setHtml(html)
-        tb.setMinimumHeight(min_h)
-        tb.setMaximumHeight(max_h)
-        tb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        """Cria um bloco HTML autoexpansível, sem rolagem interna."""
+        tb = _AutoHeightTextBrowser(min_h=min_h)
         tb.setStyleSheet(f"""
             QTextBrowser {{
                 background: {_CARD};
@@ -1220,8 +1264,9 @@ class PainelEventos(QWidget):
                 color: {_TEXTO};
                 selection-background-color: {_SEL};
             }}
-            {_SCROLL_SS}
         """)
+        tb.setHtml(html)
+        tb._ajustar_altura()
         return tb
 
     def _inserir_secao(
@@ -1316,11 +1361,11 @@ class PainelEventos(QWidget):
         o que foi capturado ao mecanismo técnico subjacente.
         """
         tipo   = e.get("tipo", "")
-        orig   = e.get("ip_origem",  "?")
+        orig   = e.get("ip_origem") or e.get("ip_envolvido") or "?"
         dest   = e.get("ip_destino", "?")
         porta  = e.get("porta_destino", "")
         tam    = e.get("tamanho", 0) or 0
-        dom    = e.get("dominio", "")
+        dom    = e.get("dominio") or e.get("tls_sni") or e.get("http_host") or ""
         mac    = e.get("mac_origem", "")
         tam_s  = f"{tam} bytes" if tam else "—"
 
@@ -1714,8 +1759,9 @@ class PainelEventos(QWidget):
         cor_cifrado = _OK if cifrado.startswith("Sim") else _CRITICO
 
         tamanho = e.get("tamanho") or 0
+        origem = e.get("ip_origem") or e.get("ip_envolvido") or "—"
         campos  = [
-            ("IP Origem",     e.get("ip_origem")  or "—",                  _TEXTO),
+            ("IP Origem",     origem,                                      _TEXTO),
             ("IP Destino",    e.get("ip_destino") or "—",                  _ACCENT2),
             ("Protocolo",     e.get("protocolo")  or e.get("tipo", "—"),   _cor(tipo)),
             ("Porta Destino", str(e.get("porta_destino") or "—"),           _TEXTO2),
@@ -1741,77 +1787,809 @@ class PainelEventos(QWidget):
                 pos,
             )
 
-    def _aba_pratica(self, e: dict):
-        pos = 0
+    def _origem_pratica(self, e: dict) -> str:
+        return e.get("ip_origem") or e.get("ip_envolvido") or "—"
 
-        mapa = {
-            "HTTPS":
-                "Tráfego cifrado e seguro. O TLS protege URL, headers, cookies e corpo — "
-                "ilegíveis para qualquer capturador na rede. Analise o <b>SNI</b> no "
-                "ClientHello para identificar o serviço sem precisar decriptar.",
-            "HTTP":
-                "Tráfego em texto puro. URL, cabeçalhos e corpo visíveis para qualquer "
-                "dispositivo na mesma rede. Solução imediata: migrar para <b>HTTPS</b> com "
-                "certificado válido e ativar <b>HSTS</b> para impedir downgrade.",
-            "DNS":
-                "Consultas DNS revelam intenção de navegação antes da conexão. Sem "
-                "<b>DoH</b> ou <b>DoT</b>, qualquer dispositivo na rede pode mapear todos "
-                "os domínios acessados. Considere ativar DNS criptografado no roteador.",
-            "ARP":
-                "Protocolo sem autenticação — vulnerável a <b>ARP Spoofing</b>. Um atacante "
-                "pode responder com MACs falsos e interceptar todo o tráfego local. Em redes "
-                "corporativas, ative <b>Dynamic ARP Inspection (DAI)</b> no switch.",
-            "ICMP":
-                "Diagnóstico de conectividade. O <b>TTL</b> revela o número de saltos e "
-                "permite estimar o sistema operacional do remetente. O <code>traceroute</code> "
-                "usa ICMP Time Exceeded para mapear o caminho até o destino.",
-            "TCP_SYN":
-                "Início do <b>3-way handshake</b> TCP. Um flood de SYNs sem ACK é o "
-                "ataque <b>SYN Flood</b>, que esgota a tabela de conexões do servidor. "
-                "Mitigação: <b>SYN Cookies</b> e rate limiting por IP.",
-            "DHCP":
-                "Distribuição automática de IPs sem autenticação. Um <b>Rogue DHCP Server</b> "
-                "pode distribuir gateway e DNS falsos, redirecionando todo o tráfego. "
-                "Ative <b>DHCP Snooping</b> no switch para bloquear servidores não autorizados.",
-            "SSH":
-                "Acesso remoto completamente cifrado. Prefira autenticação por <b>par de "
-                "chaves</b> (Ed25519 ou RSA 4096) em vez de senha. Desabilite login root "
-                "direto e considere mover a porta 22 para reduzir ruído de bots.",
-            "FTP":
-                "Protocolo legado sem criptografia. Credenciais e conteúdo dos arquivos "
-                "trafegam em texto puro. Substitua por <b>SFTP</b> (porta 22) ou "
-                "<b>FTPS</b> (TLS explícito na porta 21 ou implícito na 990).",
-            "SMB":
-                "Compartilhamento de arquivos Windows/Samba. Desabilite <b>SMBv1</b> "
-                "(vulnerável ao EternalBlue/WannaCry). Ative <b>SMB Signing</b> para "
-                "prevenir relay attacks. Restrinja o acesso com firewall na porta 445.",
-            "RDP":
-                "Acesso remoto à área de trabalho Windows. Exponha somente via <b>VPN</b>. "
-                "Ative <b>NLA</b> (Network Level Authentication) e <b>MFA</b>. "
-                "Monitore eventos <code>4624</code> (logon) e <code>4625</code> (falha) "
-                "no Event Viewer.",
-            "NOVO_DISPOSITIVO":
-                "Novo dispositivo detectado na rede local. Verifique o <b>OUI</b> do MAC "
-                "para identificar o fabricante. Em ambientes corporativos, use <b>802.1X</b> "
-                "para autenticar dispositivos antes de conceder acesso à rede.",
+    def _destino_pratica(self, e: dict) -> str:
+        destino = e.get("ip_destino") or "—"
+        porta = e.get("porta_destino") or ""
+        if destino != "—" and porta:
+            return f"{destino}:{porta}"
+        return destino
+
+    def _host_pratica(self, e: dict) -> str:
+        return (
+            e.get("dominio")
+            or e.get("tls_sni")
+            or e.get("http_host")
+            or ""
+        )
+
+    def _servico_porta(self, porta) -> str:
+        try:
+            p = int(porta)
+        except Exception:
+            return ""
+        return {
+            20: "FTP dados",
+            21: "FTP controle",
+            22: "SSH / SFTP",
+            53: "DNS",
+            67: "DHCP servidor",
+            68: "DHCP cliente",
+            80: "HTTP",
+            139: "NetBIOS / SMB legado",
+            443: "HTTPS",
+            445: "SMB",
+            853: "DNS over TLS",
+            990: "FTPS implícito",
+            3389: "RDP",
+            8080: "HTTP alternativo",
+        }.get(p, "")
+
+    def _cifrado_pratica(self, tipo: str) -> tuple[str, str]:
+        if tipo == "HTTPS":
+            return "Sim — TLS cifra HTTP, headers, cookies e corpo", _OK
+        if tipo == "SSH":
+            return "Sim — SSH cifra autenticação, comandos e arquivos", _OK
+        if tipo == "RDP":
+            return "Parcial — RDP moderno usa TLS, mas exige NLA/VPN", _AVISO
+        if tipo == "SMB":
+            return "Depende — SMBv3 pode cifrar; SMBv1/2 dependem de configuração", _AVISO
+        if tipo in ("HTTP", "FTP"):
+            return "Não — conteúdo trafega em texto puro", _CRITICO
+        if tipo == "DNS":
+            return "Não no DNS clássico — DoH/DoT seriam cifrados", _AVISO
+        if tipo in ("ARP", "DHCP", "ICMP", "TCP_SYN", "TCP_FIN", "TCP_RST", "NOVO_DISPOSITIVO"):
+            return "Não se aplica — protocolo de controle/infraestrutura", _MUTED
+        return "Não identificado", _MUTED
+
+    def _evidencias_pratica(self, e: dict, perfil: dict) -> list:
+        tipo = e.get("tipo", "")
+        origem = self._origem_pratica(e)
+        destino = self._destino_pratica(e)
+        porta = e.get("porta_destino") or ""
+        servico = self._servico_porta(porta)
+        tamanho = e.get("tamanho") or 0
+        host = self._host_pratica(e)
+        metodo = e.get("http_metodo") or e.get("metodo") or ""
+        recurso = e.get("http_caminho") or e.get("recurso") or ""
+        ttl = e.get("ttl") or ""
+        mac = e.get("mac_origem") or ""
+        dhcp_tipo = e.get("dhcp_tipo") or ""
+        arp_op = e.get("arp_op") or ""
+        flags = (
+            e.get("flags_tcp")
+            or ("SYN" if tipo == "TCP_SYN" else "FIN" if tipo == "TCP_FIN" else "RST" if tipo == "TCP_RST" else "")
+        )
+        cifrado, cor_cifrado = self._cifrado_pratica(tipo)
+
+        campos = [
+            ("Leitura principal", perfil.get("papel", "—"), _TEXTO),
+            ("Camada didática", perfil.get("camada", "—"), _TEXTO2),
+            ("Fluxo observado", f"{origem} → {destino}", _ACCENT2),
+            ("Protocolo", e.get("protocolo") or tipo or "—", _cor(tipo)),
+            ("Porta/serviço", f"{porta} — {servico}" if porta and servico else str(porta or "—"), _TEXTO2),
+            ("Host/domínio/SNI", host or "—", _ACCENT2),
+            ("Método HTTP", metodo or "—", _TEXTO2),
+            ("Recurso HTTP", recurso or "—", _TEXTO2),
+            ("Mensagem DHCP", dhcp_tipo or "—", _TEXTO2),
+            ("Operação ARP", arp_op or "—", _TEXTO2),
+            ("Flags TCP", flags or "—", _TEXTO2),
+            ("TTL", str(ttl) if ttl else "—", _TEXTO2),
+            ("MAC origem", mac or "—", _TEXTO2),
+            ("Tamanho", f"{tamanho} bytes" if tamanho else "—", _TEXTO2),
+            ("Cifrado", cifrado, cor_cifrado),
+            ("Nível", e.get("nivel", "INFO"), _NIVEL_COR.get(e.get("nivel", "INFO"), _INFO)),
+        ]
+        if e.get("alerta_seguranca"):
+            campos.append(("Alerta", e.get("alerta_seguranca"), _NIVEL_COR.get(e.get("nivel", "INFO"), _AVISO)))
+        return campos
+
+    def _perfil_pratico_proto(self, e: dict) -> dict:
+        tipo_real = e.get("tipo", "")
+        tipo = "HTTP" if tipo_real in ("HTTP_CREDENTIALS", "HTTP_REQUEST") else tipo_real
+        origem = self._origem_pratica(e)
+        destino = self._destino_pratica(e)
+        host = self._host_pratica(e) or e.get("ip_destino") or "destino não identificado"
+        porta = e.get("porta_destino") or ""
+        servico = self._servico_porta(porta)
+        metodo = (e.get("http_metodo") or e.get("metodo") or "").upper()
+        recurso = e.get("http_caminho") or e.get("recurso") or ""
+        dhcp_tipo = (e.get("dhcp_tipo") or "").upper()
+        arp_op = e.get("arp_op") or "request"
+        ttl = e.get("ttl") or ""
+        mac = e.get("mac_origem") or ""
+
+        c = lambda v: f"<code>{escape(str(v))}</code>"
+        origem_c = c(origem)
+        destino_c = c(destino)
+        host_c = c(host)
+        porta_c = c(porta) if porta else "<code>porta não informada</code>"
+        servico_txt = f" ({escape(servico)})" if servico else ""
+
+        perfis = {
+            "HTTPS": {
+                "papel": "Navegação web protegida por TLS",
+                "camada": "Aplicação + Transporte seguro",
+                "titulo": "HTTPS: a conversa web ficou visível só por fora",
+                "abertura": (
+                    f"Este evento mostra {origem_c} falando com {host_c} por HTTPS. "
+                    "A captura enxerga metadados, mas o conteúdo HTTP viaja dentro de um canal TLS."
+                ),
+                "leitura": (
+                    "A leitura correta é separar envelope e conteúdo: IP, porta, volume e, às vezes, "
+                    "<b>SNI</b> aparecem nas evidências; URL completa, cookies, headers e corpo ficam cifrados. "
+                    "Isso explica por que a aba Evidências consegue identificar o serviço sem revelar a página acessada."
+                ),
+                "causa_efeito": [
+                    ("TCP abre a sessão", "o TLS só começa depois de existir uma conexão confiável"),
+                    ("ClientHello expõe SNI quando disponível", "o domínio pode ser reconhecido sem quebrar criptografia"),
+                    ("TLS negocia chaves efêmeras", "o payload vira bytes opacos para o sniffer"),
+                ],
+                "correlacao": (
+                    "Normalmente a história começa com <b>DNS</b> resolvendo o domínio, passa por <b>TCP SYN</b> "
+                    "na porta 443, segue para o handshake <b>TLS</b> e termina com <b>TCP FIN</b> ou <b>RST</b>. "
+                    "Se você vir DNS para o mesmo host logo antes deste evento, essa é a preparação da conexão HTTPS."
+                ),
+                "cenario": "Em produção, é o padrão esperado para logins, APIs, painéis administrativos e navegação comum.",
+                "impacto": "Boa confidencialidade: quem captura a rede vê com quem o host falou e quanto trafegou, mas não o conteúdo.",
+                "acao": "Validar certificado, exigir TLS moderno, habilitar HSTS e investigar apenas metadados anômalos, como destino inesperado ou volume fora do padrão.",
+                "perguntas": [
+                    "O domínio/SNI combina com a atividade esperada do usuário?",
+                    "Houve DNS imediatamente antes apontando para o mesmo serviço?",
+                    "O volume de bytes é coerente com navegação comum ou parece exfiltração?",
+                ],
+            },
+            "HTTP": {
+                "papel": "Navegação web sem criptografia",
+                "camada": "Aplicação sobre TCP",
+                "titulo": "HTTP: a conversa web ficou legível na rede",
+                "abertura": (
+                    f"{origem_c} enviou tráfego HTTP para {host_c}. "
+                    "Aqui a captura não vê apenas metadados: ela pode ver método, caminho, headers, cookies e corpo."
+                ),
+                "leitura": (
+                    f"Se aparecer {c(metodo) if metodo else '<code>GET/POST</code>'} "
+                    f"{c(recurso) if recurso else ''}, isso é a própria requisição. "
+                    "Como não há TLS, qualquer credencial, token ou cookie presente no pacote vira evidência operacional, não hipótese."
+                ),
+                "causa_efeito": [
+                    ("HTTP trafega em texto puro", "campos de formulário, cookies e URLs podem ser lidos diretamente"),
+                    ("POST/GET carrega dados da aplicação", "o pacote pode revelar intenção e conteúdo do usuário"),
+                    ("Sem HSTS", "um atacante pode tentar forçar downgrade de HTTPS para HTTP"),
+                ],
+                "correlacao": (
+                    "Antes do HTTP costuma aparecer <b>DNS</b>, depois um <b>TCP SYN</b> para a porta 80. "
+                    "A versão segura da mesma história é <b>HTTPS</b> na porta 443, onde estes campos deixam de ser legíveis."
+                ),
+                "cenario": "É comum em laboratórios, sistemas legados, câmeras IP antigas e páginas internas mal configuradas.",
+                "impacto": "Alto risco se houver autenticação: captura passiva já basta para roubar sessão ou credenciais.",
+                "acao": "Migrar para HTTPS, ativar HSTS, marcar cookies como Secure/HttpOnly e remover endpoints HTTP de login.",
+                "perguntas": [
+                    "Há senha, token, cookie ou identificador pessoal no payload?",
+                    "O destino oferece HTTPS e mesmo assim o cliente usou HTTP?",
+                    "Este tráfego pertence a sistema legado que precisa de correção planejada?",
+                ],
+            },
+            "DNS": {
+                "papel": "Resolução de nomes antes da conexão",
+                "camada": "Aplicação de infraestrutura",
+                "titulo": "DNS: o host perguntou para onde deve ir",
+                "abertura": (
+                    f"{origem_c} consultou DNS sobre {destino_c}. "
+                    "Esse evento costuma ser o primeiro indício da intenção de comunicação."
+                ),
+                "leitura": (
+                    f"O domínio {host_c} representa a pergunta: 'qual IP corresponde a este nome?'. "
+                    "Sem essa resposta, HTTP, HTTPS, SSH por hostname e várias aplicações nem sabem qual endereço alcançar."
+                ),
+                "causa_efeito": [
+                    ("Aplicação usa um nome", "o sistema precisa convertê-lo em IP roteável"),
+                    ("DNS clássico usa UDP/53", "a consulta é rápida, mas visível na rede"),
+                    ("Resposta com TTL", "o resultado pode ser reaproveitado em cache por um tempo"),
+                ],
+                "correlacao": (
+                    "Procure, logo depois, <b>TCP SYN</b> ou <b>HTTPS/HTTP</b> para o IP resolvido. "
+                    "DNS conta o começo da história; os protocolos de aplicação contam o que aconteceu depois."
+                ),
+                "cenario": "Em redes corporativas, DNS revela uso de SaaS, malware beaconing, consultas a domínios internos e erros de configuração.",
+                "impacto": "Mesmo sem ver conteúdo HTTPS, DNS pode expor hábitos, serviços usados e destinos suspeitos.",
+                "acao": "Usar resolvedores confiáveis, ativar DoH/DoT quando fizer sentido e monitorar domínios recém-criados ou incomuns.",
+                "perguntas": [
+                    "O domínio consultado era esperado para esse dispositivo?",
+                    "Há muitas consultas repetidas, indicando falha ou tentativa de beaconing?",
+                    "Depois da consulta veio uma conexão real para o destino?",
+                ],
+            },
+            "ARP": {
+                "papel": "Tradução de IP para MAC na rede local",
+                "camada": "Enlace entre Ethernet e IP",
+                "titulo": "ARP: antes de rotear, o host precisa achar o vizinho",
+                "abertura": (
+                    f"{origem_c} usou ARP para descobrir ou anunciar um vínculo IP/MAC. "
+                    "É uma etapa local: ela não atravessa roteadores."
+                ),
+                "leitura": (
+                    "ARP responde uma pergunta simples: 'qual endereço MAC entrega quadros para este IP?'. "
+                    f"A operação observada foi {c(arp_op)}; o MAC de origem {c(mac) if mac else '<code>não veio no evento</code>'} "
+                    "é a evidência que conecta a camada 2 à camada 3."
+                ),
+                "causa_efeito": [
+                    ("IP de destino está no mesmo segmento ou é gateway", "o host precisa do MAC para montar o quadro Ethernet"),
+                    ("ARP não autentica respostas", "um MAC falso pode envenenar a tabela ARP"),
+                    ("Cache ARP é atualizado", "pacotes seguintes passam a usar o MAC aprendido"),
+                ],
+                "correlacao": (
+                    "ARP costuma aparecer antes de qualquer tráfego local: DHCP entrega IP, ARP encontra gateway ou vizinho, "
+                    "e só então DNS/HTTP/HTTPS seguem. Em ataques MitM, ARP anômalo antecede vazamento de HTTP ou redirecionamento."
+                ),
+                "cenario": "Normal em redes locais; crítico quando há respostas frequentes, MACs mudando ou IP de gateway associado a MAC inesperado.",
+                "impacto": "Se abusado, permite interceptação local mesmo sem comprometer o roteador.",
+                "acao": "Verificar tabela ARP, ativar Dynamic ARP Inspection em switches gerenciados e proteger o gateway contra spoofing.",
+                "perguntas": [
+                    "O MAC pertence ao fabricante esperado para esse IP?",
+                    "O gateway apareceu com MAC diferente do normal?",
+                    "Há muitas respostas ARP sem solicitação prévia?",
+                ],
+            },
+            "ICMP": {
+                "papel": "Diagnóstico e controle do IP",
+                "camada": "Rede",
+                "titulo": "ICMP: a rede está respondendo sobre o próprio caminho",
+                "abertura": (
+                    f"{origem_c} enviou ou recebeu ICMP envolvendo {destino_c}. "
+                    "Isso não é uma aplicação: é a camada IP avisando sobre alcance, rota ou tempo de vida."
+                ),
+                "leitura": (
+                    f"O TTL observado {c(ttl) if ttl else '<code>não informado</code>'} ajuda a estimar distância e, às vezes, sistema operacional. "
+                    "Echo Request/Reply indica teste de conectividade; Time Exceeded ajuda a montar traceroute; Unreachable aponta bloqueio ou falha."
+                ),
+                "causa_efeito": [
+                    ("Ping envia Echo Request", "um Echo Reply confirma que o destino responde"),
+                    ("TTL chega a zero", "um roteador devolve Time Exceeded"),
+                    ("Destino/porta inacessível", "a rede pode devolver Destination Unreachable"),
+                ],
+                "correlacao": (
+                    "ICMP costuma aparecer quando alguém diagnostica falha vista em HTTP, DNS, SSH ou RDP. "
+                    "Ele ajuda a separar problema de aplicação de problema de rota ou alcançabilidade."
+                ),
+                "cenario": "Útil para troubleshooting; também usado em ping sweep para descobrir hosts ativos.",
+                "impacto": "Bloquear tudo pode esconder a rede, mas também prejudica diagnóstico e Path MTU Discovery.",
+                "acao": "Permitir ICMP essencial, monitorar varreduras e correlacionar TTL/latência com mudanças de rota.",
+                "perguntas": [
+                    "Este ICMP confirma conectividade ou informa uma falha?",
+                    "O TTL sugere origem local, remota ou comportamento inesperado?",
+                    "Há sequência de ICMP para muitos hosts, indicando varredura?",
+                ],
+            },
+            "TCP_SYN": {
+                "papel": "Abertura de conexão TCP",
+                "camada": "Transporte",
+                "titulo": "TCP SYN: alguém bateu à porta do serviço",
+                "abertura": (
+                    f"{origem_c} enviou SYN para {destino_c}. "
+                    f"A porta {porta_c}{servico_txt} indica qual serviço o cliente está tentando iniciar."
+                ),
+                "leitura": (
+                    "SYN é o primeiro passo do three-way handshake. Ainda não há dados de aplicação; há apenas a intenção de criar uma sessão confiável."
+                ),
+                "causa_efeito": [
+                    ("Cliente precisa de sessão confiável", "envia SYN com número de sequência inicial"),
+                    ("Servidor aceita", "responde SYN-ACK e reserva estado temporário"),
+                    ("Cliente confirma", "ACK completa a sessão e libera tráfego de aplicação"),
+                ],
+                "correlacao": (
+                    "Depois deste SYN, procure HTTPS, HTTP, SSH, SMB, RDP ou FTP na mesma porta. "
+                    "Se vier RST, a porta pode estar fechada; se muitos SYNs ficam sem conclusão, pense em scan ou SYN flood."
+                ),
+                "cenario": "Aparece em qualquer conexão TCP: navegação, login remoto, compartilhamento de arquivos e varredura de portas.",
+                "impacto": "Isolado é normal; em volume alto pode indicar ataque de negação de serviço ou reconhecimento.",
+                "acao": "Correlacionar origem, porta e frequência; aplicar rate limiting/SYN cookies em servidores expostos.",
+                "perguntas": [
+                    "Qual serviço a porta sugere?",
+                    "Houve SYN-ACK/ACK ou a tentativa terminou em RST/timeout?",
+                    "A origem repetiu SYNs para muitas portas ou destinos?",
+                ],
+            },
+            "TCP_FIN": {
+                "papel": "Encerramento ordenado de conexão TCP",
+                "camada": "Transporte",
+                "titulo": "TCP FIN: a conversa terminou de forma organizada",
+                "abertura": (
+                    f"{origem_c} sinalizou FIN para {destino_c}. "
+                    "Isso normalmente significa que uma aplicação terminou de enviar dados e quer fechar a sessão sem perder pacotes."
+                ),
+                "leitura": (
+                    "FIN não é erro. Ele faz parte de um encerramento em etapas: um lado diz que terminou, o outro confirma, depois também encerra."
+                ),
+                "causa_efeito": [
+                    ("Aplicação concluiu a troca", "envia FIN para não aceitar mais envio naquele sentido"),
+                    ("Par responde ACK", "confirma que recebeu o pedido de encerramento"),
+                    ("Ambos fecham", "recursos da conexão são liberados após TIME_WAIT"),
+                ],
+                "correlacao": (
+                    "FIN é o final saudável de sessões iniciadas por TCP_SYN. Ele pode aparecer depois de HTTPS, SSH, SMB, RDP, FTP ou HTTP."
+                ),
+                "cenario": "Normal ao fechar página, terminar download, sair de sessão SSH ou concluir transferência.",
+                "impacto": "Mostra liberação limpa de recursos; excesso de TIME_WAIT pode afetar servidores de alto volume.",
+                "acao": "Tratar como normal, salvo se houver muitos encerramentos prematuros ou ciclos curtos demais para a aplicação.",
+                "perguntas": [
+                    "A sessão teve tempo suficiente para completar a operação?",
+                    "O FIN veio depois de dados úteis ou logo após abrir?",
+                    "Há muitos FINs em sequência sugerindo instabilidade de aplicação?",
+                ],
+            },
+            "TCP_RST": {
+                "papel": "Interrupção abrupta de conexão TCP",
+                "camada": "Transporte",
+                "titulo": "TCP RST: a sessão foi recusada ou abortada",
+                "abertura": (
+                    f"{origem_c} enviou ou recebeu RST envolvendo {destino_c}. "
+                    "Diferente do FIN, RST corta a conversa imediatamente."
+                ),
+                "leitura": (
+                    "RST costuma indicar porta fechada, firewall em modo reject, aplicação que abortou a sessão ou pacote fora de estado."
+                ),
+                "causa_efeito": [
+                    ("SYN chega a porta fechada", "o kernel responde RST"),
+                    ("Firewall rejeita explicitamente", "o cliente recebe falha rápida em vez de timeout"),
+                    ("Aplicação aborta", "dados pendentes podem ser descartados"),
+                ],
+                "correlacao": (
+                    "Compare com TCP_SYN: SYN seguido de RST sugere porta fechada. Muitos RSTs para portas diferentes sugerem varredura. "
+                    "FIN, por outro lado, indicaria encerramento normal."
+                ),
+                "cenario": "Normal em tentativas para serviços ausentes; suspeito quando aparece em série ou contra muitas portas.",
+                "impacto": "Ajuda a diagnosticar serviço indisponível, regra de firewall ou reconhecimento de portas.",
+                "acao": "Verificar se a porta deveria estar aberta, revisar firewall e procurar padrão de scan por origem/destino.",
+                "perguntas": [
+                    "Qual tentativa veio imediatamente antes do RST?",
+                    "A porta deveria aceitar conexão?",
+                    "O mesmo host recebeu RST de várias portas?",
+                ],
+            },
+            "DHCP": {
+                "papel": "Configuração automática de endereço IP",
+                "camada": "Aplicação de infraestrutura local",
+                "titulo": "DHCP: o dispositivo recebeu identidade de rede",
+                "abertura": (
+                    f"O evento DHCP {c(dhcp_tipo) if dhcp_tipo else ''} mostra {origem_c} participando da obtenção de configuração IP."
+                ),
+                "leitura": (
+                    "DHCP entrega IP, máscara, gateway, DNS e tempo de concessão. Sem isso, o host pode até estar conectado fisicamente, "
+                    "mas não sabe como falar com a rede IP."
+                ),
+                "causa_efeito": [
+                    ("Cliente entra sem IP", "envia DISCOVER em broadcast"),
+                    ("Servidor oferece configuração", "OFFER informa IP, gateway e DNS"),
+                    ("Cliente aceita", "REQUEST/ACK tornam o endereço utilizável"),
+                ],
+                "correlacao": (
+                    "Depois do DHCP, é comum ver ARP para descobrir o gateway, DNS para resolver nomes e então TCP/HTTPS/HTTP. "
+                    "Se o DNS ou gateway oferecido for falso, todo o restante da história pode ser desviado."
+                ),
+                "cenario": "Normal em conexão Wi-Fi/cabeada, renovação de lease e entrada de novos dispositivos.",
+                "impacto": "Servidor DHCP malicioso pode redirecionar tráfego, trocar DNS e inserir o atacante no caminho.",
+                "acao": "Ativar DHCP Snooping, autorizar somente portas confiáveis para servidor DHCP e auditar leases.",
+                "perguntas": [
+                    "O servidor DHCP é o esperado para essa rede?",
+                    "O gateway e DNS ofertados são legítimos?",
+                    "O evento coincide com novo dispositivo aparecendo na topologia?",
+                ],
+            },
+            "SSH": {
+                "papel": "Administração remota cifrada",
+                "camada": "Aplicação segura sobre TCP",
+                "titulo": "SSH: acesso remoto com canal protegido",
+                "abertura": (
+                    f"{origem_c} abriu comunicação SSH com {destino_c}. "
+                    "A porta 22 costuma indicar shell remoto, automação, SFTP ou tunelamento."
+                ),
+                "leitura": (
+                    "A captura pode ver IPs, porta, volume e início da negociação, mas não senha, chave, comandos ou saída do terminal."
+                ),
+                "causa_efeito": [
+                    ("TCP estabelece a sessão", "SSH negocia versão e algoritmos"),
+                    ("Troca de chaves cria segredo compartilhado", "autenticação passa dentro do canal cifrado"),
+                    ("Sessão autenticada", "comandos e transferências ficam opacos"),
+                ],
+                "correlacao": (
+                    "SSH pode substituir Telnet e FTP. Quando usado como SFTP, ele cumpre o papel de transferência segura que FTP não oferece."
+                ),
+                "cenario": "Administração de servidores, automação DevOps, acesso a roteadores Linux e cópia segura de arquivos.",
+                "impacto": "Seguro quando usa chaves fortes; perigoso se exposto com senha fraca e sem MFA.",
+                "acao": "Preferir chaves Ed25519, desabilitar root direto, limitar origem por firewall e monitorar tentativas repetidas.",
+                "perguntas": [
+                    "A origem tem permissão para administrar esse destino?",
+                    "Há muitas tentativas curtas, sugerindo brute force?",
+                    "A sessão transferiu volume compatível com comandos ou arquivos?",
+                ],
+            },
+            "FTP": {
+                "papel": "Transferência de arquivos legada sem proteção",
+                "camada": "Aplicação sobre TCP",
+                "titulo": "FTP: arquivos e credenciais podem estar expostos",
+                "abertura": (
+                    f"{origem_c} comunicou-se com {destino_c} via FTP. "
+                    "O canal de controle geralmente usa porta 21 e trafega comandos em texto puro."
+                ),
+                "leitura": (
+                    "FTP separa controle e dados. USER, PASS, LIST e RETR podem aparecer legíveis; arquivos também podem trafegar sem cifra."
+                ),
+                "causa_efeito": [
+                    ("Cliente autentica no canal de controle", "usuário e senha podem ser capturados"),
+                    ("Servidor negocia canal de dados", "firewalls/NAT podem complicar a conexão"),
+                    ("Arquivo é transferido", "conteúdo pode ficar visível no caminho"),
+                ],
+                "correlacao": (
+                    "Compare com SSH/SFTP: mesma finalidade prática de mover arquivos, mas com proteção. "
+                    "Se antes houve DNS, ele indica o servidor FTP procurado."
+                ),
+                "cenario": "Sistemas legados, equipamentos antigos, integrações industriais ou servidores esquecidos.",
+                "impacto": "Risco alto de vazamento de credenciais e conteúdo; credencial reutilizada abre caminho para movimentação lateral.",
+                "acao": "Migrar para SFTP ou FTPS, bloquear FTP fora de redes isoladas e trocar senhas expostas.",
+                "perguntas": [
+                    "Há USER/PASS ou nomes de arquivo no payload?",
+                    "O servidor ainda precisa de FTP ou pode usar SFTP?",
+                    "As credenciais vistas são reutilizadas em outros serviços?",
+                ],
+            },
+            "SMB": {
+                "papel": "Compartilhamento de arquivos e serviços Windows",
+                "camada": "Aplicação de rede local",
+                "titulo": "SMB: acesso a recursos compartilhados",
+                "abertura": (
+                    f"{origem_c} acessou {destino_c} por SMB. "
+                    "A porta 445 costuma representar compartilhamentos Windows/Samba, impressoras e IPC."
+                ),
+                "leitura": (
+                    "O ponto central é a versão e a proteção: SMBv1 é legado e perigoso; SMB Signing e SMB Encryption reduzem relay e adulteração."
+                ),
+                "causa_efeito": [
+                    ("Cliente procura compartilhamento", "abre sessão SMB na porta 445"),
+                    ("Autenticação NTLM/Kerberos ocorre", "permissões determinam acesso a arquivos"),
+                    ("Sem assinatura obrigatória", "ataques de relay podem reutilizar autenticação"),
+                ],
+                "correlacao": (
+                    "SMB conversa com identidade de rede: DNS/NetBIOS localizam nomes, Kerberos/NTLM autenticam, e TCP mantém a sessão."
+                ),
+                "cenario": "Compartilhamento de pastas corporativas, servidores de arquivos, impressoras e comunicação entre máquinas Windows.",
+                "impacto": "Exposição indevida facilita vazamento de arquivos, ransomware e movimentação lateral.",
+                "acao": "Desativar SMBv1, restringir porta 445, exigir signing/encryption quando possível e revisar permissões de compartilhamento.",
+                "perguntas": [
+                    "O destino deveria aceitar SMB desse host?",
+                    "SMBv1 está desativado?",
+                    "O tráfego é arquivo legítimo ou tentativa de enumeração?",
+                ],
+            },
+            "RDP": {
+                "papel": "Área de trabalho remota Windows",
+                "camada": "Aplicação remota sobre TCP/TLS",
+                "titulo": "RDP: controle remoto com alto valor operacional",
+                "abertura": (
+                    f"{origem_c} tentou ou iniciou RDP com {destino_c}. "
+                    "A porta 3389 normalmente significa sessão gráfica remota."
+                ),
+                "leitura": (
+                    "RDP moderno pode usar TLS, mas segurança real depende de NLA, MFA, VPN/RD Gateway e controle rigoroso de exposição."
+                ),
+                "causa_efeito": [
+                    ("Cliente abre TCP/3389", "servidor prepara negociação RDP"),
+                    ("NLA habilitado", "usuário autentica antes da sessão gráfica"),
+                    ("RDP exposto sem proteção", "bots tentam brute force continuamente"),
+                ],
+                "correlacao": (
+                    "RDP usa TCP como base e pode gerar muitos eventos de autenticação no Windows. "
+                    "Compare com SSH: ambos administram remotamente, mas RDP expõe uma superfície gráfica maior."
+                ),
+                "cenario": "Suporte remoto, administração de servidores Windows e acesso emergencial a estações.",
+                "impacto": "Exposição direta à internet é crítica; uma credencial fraca pode virar controle total do host.",
+                "acao": "Usar VPN/RD Gateway, NLA, MFA, bloqueio por origem e monitorar eventos 4624/4625.",
+                "perguntas": [
+                    "A origem é autorizada a acessar RDP?",
+                    "O RDP está exposto fora da VPN?",
+                    "Há tentativas repetidas de logon falho no mesmo período?",
+                ],
+            },
+            "NOVO_DISPOSITIVO": {
+                "papel": "Entrada ou descoberta de host na rede",
+                "camada": "Inventário e controle de acesso",
+                "titulo": "Novo dispositivo: a topologia ganhou um participante",
+                "abertura": (
+                    f"O IP {origem_c} apareceu como novo dispositivo. "
+                    "O MAC observado ajuda a ligar endereço lógico, fabricante e presença física na rede."
+                ),
+                "leitura": (
+                    f"MAC {c(mac) if mac else '<code>não informado</code>'} e IP formam a primeira identidade do host. "
+                    "Essa leitura não prova autorização; ela apenas confirma que o dispositivo se tornou visível."
+                ),
+                "causa_efeito": [
+                    ("Host entra no Wi-Fi/cabo", "DHCP pode conceder IP"),
+                    ("Host fala na rede", "ARP ou outro pacote revela IP/MAC"),
+                    ("Topologia atualiza inventário", "o analista decide se o ativo é esperado"),
+                ],
+                "correlacao": (
+                    "Depois deste evento, procure DHCP, ARP, DNS e conexões de aplicação vindas do mesmo IP. "
+                    "A sequência mostra se ele apenas entrou ou se começou atividade relevante."
+                ),
+                "cenario": "Aluno conectando notebook, IoT novo, visitante, VM criada ou dispositivo não autorizado.",
+                "impacto": "Novo ativo muda a superfície da rede; se não for reconhecido, pode ser risco operacional ou de segurança.",
+                "acao": "Conferir inventário, fabricante/OUI, dono do equipamento e aplicar 802.1X ou rede de visitantes quando necessário.",
+                "perguntas": [
+                    "Esse IP/MAC consta no inventário?",
+                    "O fabricante combina com o tipo de equipamento esperado?",
+                    "O dispositivo iniciou tráfego suspeito logo após aparecer?",
+                ],
+            },
         }
 
-        tipo  = e.get("tipo", "")
-        texto = mapa.get(tipo, "Análise operacional baseada no fluxo detectado.")
+        return perfis.get(tipo, {
+            "papel": "Evento de rede genérico",
+            "camada": "Camada não classificada",
+            "titulo": f"{escape(tipo or 'Pacote')}: evento observado na captura",
+            "abertura": f"O NetLab capturou tráfego entre {origem_c} e {destino_c}.",
+            "leitura": "Use os campos técnicos para identificar protocolo, fluxo, tamanho e direção antes de concluir impacto.",
+            "causa_efeito": [
+                ("Pacote foi observado", "há comunicação real ou tentativa entre os endpoints"),
+                ("Campos técnicos foram extraídos", "a interpretação depende de protocolo, porta e payload disponível"),
+            ],
+            "correlacao": "Compare este evento com DNS, TCP e demais eventos próximos no tempo para montar a sequência completa.",
+            "cenario": "Útil para tráfego ainda não especializado pelo motor pedagógico.",
+            "impacto": "Depende do protocolo e do contexto operacional.",
+            "acao": "Validar origem, destino, porta e frequência antes de classificar risco.",
+            "perguntas": [
+                "Este fluxo era esperado?",
+                "Há eventos anteriores ou posteriores que expliquem a tentativa?",
+                "A porta sugere algum serviço conhecido?",
+            ],
+        })
 
-        html_op = f"""
-            <style>{self._CSS_BASE}</style>
+    def _causa_efeito_html(self, perfil: dict) -> str:
+        linhas = ""
+        for causa, efeito in perfil.get("causa_efeito", []):
+            linhas += (
+                f"<tr>"
+                f"<td class='causa'>{causa}</td>"
+                f"<td class='seta'>gera</td>"
+                f"<td class='efeito'>{efeito}</td>"
+                f"</tr>"
+            )
+        return linhas or (
+            "<tr><td class='causa'>Evento observado</td>"
+            "<td class='seta'>gera</td>"
+            "<td class='efeito'>necessidade de correlacionar com o contexto da captura</td></tr>"
+        )
+
+    def _perguntas_html(self, perguntas: list[str]) -> str:
+        linhas = "".join(
+            f"<tr class='pergunta'>"
+            f"<td class='pnum' width='34'>{i}.</td>"
+            f"<td class='ptxt'>&nbsp;{pergunta}</td>"
+            f"</tr>"
+            for i, pergunta in enumerate(perguntas, 1)
+        )
+        return f"<table class='perguntas'>{linhas}</table>"
+
+    def _gerar_html_pratica(self, e: dict, perfil: dict) -> str:
+        tipo = e.get("tipo", "")
+        cor = _cor(tipo)
+        nivel = e.get("nivel", "INFO")
+        titulo_evento = escape(str(e.get("titulo", "") or perfil.get("titulo", "")))
+        fluxo = escape(str(e.get("fluxo_visual", "") or f"{self._origem_pratica(e)} → {self._destino_pratica(e)}"))
+        alerta = e.get("alerta_seguranca", "")
+        alerta_html = ""
+        if alerta:
+            cor_alerta = _NIVEL_COR.get(nivel, _AVISO)
+            alerta_html = (
+                f"<div class='alerta' style='border-color:{cor_alerta};'>"
+                f"<b style='color:{cor_alerta};'>Atenção:</b> {escape(str(alerta))}</div>"
+            )
+
+        css = f"""
+            {self._CSS_BASE}
+            .intro {{
+                border: 1px solid {_BORDA2};
+                border-radius: 7px;
+                padding: 13px 15px;
+                background: rgba(58,158,207,0.045);
+                margin-bottom: 12px;
+            }}
+            .eyebrow {{
+                color: {cor};
+                font-size: 8px;
+                font-weight: bold;
+                letter-spacing: 1.4px;
+                text-transform: uppercase;
+                margin-bottom: 5px;
+            }}
+            .titulo {{
+                color: {_TEXTO};
+                font-size: 13px;
+                font-weight: 600;
+                margin-bottom: 6px;
+            }}
+            .mini {{
+                color: {_MUTED};
+                font-family: Consolas, monospace;
+                font-size: 9px;
+                margin-top: 8px;
+            }}
+            .passo {{
+                border-left: 2px solid {cor};
+                padding: 7px 0 11px 14px;
+                margin: 12px 0;
+                line-height: 1.75;
+            }}
+            .num {{
+                color: {_DIM};
+                font-family: Consolas, monospace;
+                font-size: 9px;
+                letter-spacing: .8px;
+                margin-bottom: 5px;
+            }}
+            .ptitulo {{
+                color: {_TEXTO2};
+                font-weight: 600;
+                margin-bottom: 6px;
+            }}
+            .causas {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 8px;
+            }}
+            .causas td {{
+                border-top: 1px solid {_LINHA};
+                padding: 7px 6px;
+                vertical-align: top;
+            }}
+            .causa {{
+                color: {_TEXTO};
+                width: 36%;
+            }}
+            .seta {{
+                color: {_DIM};
+                text-align: center;
+                width: 42px;
+                font-size: 9px;
+                text-transform: uppercase;
+                letter-spacing: .7px;
+            }}
+            .efeito {{
+                color: {_TEXTO2};
+            }}
+            .alerta {{
+                border-left: 2px solid {_AVISO};
+                padding: 7px 10px;
+                margin: 10px 0 0 0;
+                background: rgba(255,255,255,0.025);
+            }}
+        """
+
+        return f"""
+            <style>{css}</style>
             <body>
-              <div style="border-left: 2px solid {_ACCENT};
-                          padding: 0 0 0 12px; margin: 0;">
-                {texto}
+              <div class="intro">
+                <div class="eyebrow">Instrutor de análise</div>
+                <div class="titulo">{perfil.get("titulo", "Evento de rede")}</div>
+                <div>{perfil.get("abertura", "")}</div>
+                <div class="mini">{titulo_evento} · {fluxo}</div>
+                {alerta_html}
+              </div>
+
+              <div class="passo">
+                <div class="num">PASSO 1</div>
+                <div class="ptitulo">Comece pelo que a interface está mostrando</div>
+                <div>{perfil.get("leitura", "")}</div>
+              </div>
+
+              <div class="passo">
+                <div class="num">PASSO 2</div>
+                <div class="ptitulo">Transforme evidência em causa e efeito</div>
+                <table class="causas">{self._causa_efeito_html(perfil)}</table>
+              </div>
+
+              <div class="passo">
+                <div class="num">PASSO 3</div>
+                <div class="ptitulo">Coloque este pacote dentro da história da comunicação</div>
+                <div>{perfil.get("correlacao", "")}</div>
               </div>
             </body>
         """
+
+    def _gerar_html_impacto_pratica(self, perfil: dict) -> str:
+        perguntas = self._perguntas_html(perfil.get("perguntas", []))
+        css = f"""
+            {self._CSS_BASE}
+            .bloco {{
+                border: 1px solid {_BORDA};
+                border-radius: 6px;
+                padding: 13px 15px;
+                margin: 0 0 12px 0;
+                background: rgba(255,255,255,0.018);
+                line-height: 1.75;
+            }}
+            .rotulo {{
+                color: {_MUTED};
+                font-size: 8px;
+                font-weight: bold;
+                letter-spacing: 1.3px;
+                text-transform: uppercase;
+                margin-bottom: 9px;
+            }}
+            .perguntas {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 3px;
+            }}
+            .perguntas td {{
+                border-top: 1px solid {_LINHA};
+                padding-top: 8px;
+                padding-bottom: 8px;
+                vertical-align: top;
+                line-height: 1.65;
+            }}
+            .pnum {{
+                width: 30px;
+                min-width: 30px;
+                color: {_ACCENT2};
+                font-family: Consolas, monospace;
+                font-size: 10px;
+                font-weight: bold;
+                padding-right: 10px;
+                white-space: nowrap;
+            }}
+            .ptxt {{
+                color: {_TEXTO2};
+                padding-left: 6px;
+            }}
+        """
+        return f"""
+            <style>{css}</style>
+            <body>
+              <div class="bloco">
+                <div class="rotulo">Cenário real</div>
+                <div>{perfil.get("cenario", "")}</div>
+              </div>
+              <div class="bloco">
+                <div class="rotulo">Impacto operacional e técnico</div>
+                <div>{perfil.get("impacto", "")}</div>
+              </div>
+              <div class="bloco">
+                <div class="rotulo">Próxima decisão do analista</div>
+                <div>{perfil.get("acao", "")}</div>
+              </div>
+              <div class="bloco">
+                <div class="rotulo">Perguntas para conduzir a aula</div>
+                {perguntas}
+              </div>
+            </body>
+        """
+
+    def _aba_pratica(self, e: dict):
+        pos = 0
+        perfil = self._perfil_pratico_proto(e)
+
         self._inserir_secao(
-            "SIGNIFICADO OPERACIONAL",
-            self._browser(html_op),
+            "AULA GUIADA DO EVENTO",
+            self._browser(self._gerar_html_pratica(e, perfil), 210, 720),
             _ACCENT,
+            pos,
+        )
+        pos += 1
+
+        self._inserir_secao(
+            "EVIDÊNCIAS USADAS NA LEITURA",
+            _MetaGrid(self._evidencias_pratica(e, perfil)),
+            _MUTED,
+            pos,
+        )
+        pos += 1
+
+        self._inserir_secao(
+            "CORRELAÇÕES, IMPACTO E DECISÃO",
+            self._browser(self._gerar_html_impacto_pratica(perfil), 190, 620),
+            _ACCENT2,
             pos,
         )
         pos += 1

@@ -203,6 +203,8 @@ class MotorPedagogico:
             "ip_destino":       evento.get("ip_destino", ""),
             "contador":         self._contadores.get(tipo, 1),
         }
+        for k, v in evento.items():
+            resultado.setdefault(k, v)
         for k, v in list(resultado.items()):
             if isinstance(v, str):
                 resultado[k] = corrigir_mojibake(v)
