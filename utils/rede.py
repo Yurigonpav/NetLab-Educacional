@@ -188,3 +188,77 @@ def detectar_cidr_robusto(ip_local: str) -> str | None:
         pass
 
     return None
+
+
+def detectar_gateway_robusto(ip_local: str) -> str | None:
+    """
+    Tenta detectar o Default Gateway associado ao IP local de todas as formas possíveis no Windows.
+    Retorna a string do IP do Gateway (ex: '192.168.1.1') ou None.
+    """
+    if not ip_local or ip_local.startswith(("127.", "0.0.0.0")):
+        return None
+
+    import subprocess
+    import re
+
+    # ── 1. WMI via PowerShell (Muito preciso para a interface com este IP) ──
+    try:
+        cmd = f"(Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object {{$_.IPAddress -contains '{ip_local}'}}).DefaultIPGateway"
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            capture_output=True, text=True, timeout=5,
+            creationflags=0x08000000 # CREATE_NO_WINDOW
+        )
+        out = proc.stdout.strip()
+        m = re.search(r"((?:\d+\.){3}\d+)", out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+
+    # ── 2. PowerShell genérico para rota padrão ──
+    try:
+        cmd = "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object {$_.NextHop -ne '0.0.0.0'} | Select-Object -ExpandProperty NextHop -First 1)"
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            capture_output=True, text=True, timeout=5,
+            creationflags=0x08000000
+        )
+        out = proc.stdout.strip()
+        m = re.search(r"((?:\d+\.){3}\d+)", out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+
+    # ── 3. ipconfig /all (Parsing manual de acordo com o IP local) ──
+    try:
+        proc = subprocess.run(["ipconfig", "/all"], capture_output=True, text=True, timeout=5, creationflags=0x08000000)
+        out = proc.stdout
+        idx = out.find(ip_local)
+        if idx != -1:
+            trecho = out[idx:idx+1000]
+            m = re.search(r"(?:Gateway Padr[aã]o|Default Gateway)[^:]*:\s*((?:\d+\.){3}\d+)", trecho, re.I)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+
+    # ── 4. Scapy Route Table ──
+    try:
+        from scapy.all import conf
+        res = conf.route.route("8.8.8.8")
+        if res and len(res) >= 2 and res[1] and res[1] != "0.0.0.0":
+            return res[1]
+    except Exception:
+        pass
+
+    # ── 5. Palpite baseado na rede local (último recurso) ──
+    try:
+        partes = ip_local.split(".")
+        if len(partes) == 4:
+            return f"{partes[0]}.{partes[1]}.{partes[2]}.1"
+    except Exception:
+        pass
+
+    return None

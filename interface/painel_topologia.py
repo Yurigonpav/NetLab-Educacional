@@ -25,12 +25,12 @@ from collections import defaultdict
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QFrame, QPushButton, QInputDialog
+    QFrame, QPushButton, QInputDialog, QMenu, QApplication
 )
-from PyQt6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint
+from PyQt6.QtCore import Qt, QPointF, QTimer, QRectF, QPoint, pyqtSignal
 from PyQt6.QtGui import (
     QPainter, QPen, QBrush, QColor, QFont,
-    QRadialGradient, QCursor, QPainterPath, QFontMetrics
+    QRadialGradient, QCursor, QPainterPath, QFontMetrics, QAction
 )
 from utils.identificador import (
     GerenciadorDispositivos,
@@ -108,7 +108,6 @@ class PainelDetalhes(QFrame):
             ("status",     "Status"),
             ("confianca",  "Confiança"),
             ("fabricante", "Fabricante"),
-            ("apelido",    "Apelido"),
         ]
         for chave, rotulo in campos_def:
             linha = QHBoxLayout()
@@ -184,18 +183,6 @@ class PainelDetalhes(QFrame):
             else "color: #95a5a6; font-size:10px;"
         )
 
-        apelido = dados.get("apelido") or ""
-        if not apelido and mac_disp:
-            try:
-                apelido = GerenciadorDispositivos().obter_apelido(mac_disp)
-            except Exception:
-                apelido = ""
-        self._campos["apelido"].setText(apelido or "---")
-        self._campos["apelido"].setStyleSheet(
-            "color: #F39C12; font-weight:bold; font-size:10px;" if apelido
-            else "color: #95a5a6; font-size:10px;"
-        )
-
         self.adjustSize()
         self.show()
 
@@ -206,21 +193,28 @@ class VisualizadorTopologia(QWidget):
     """
     Canvas interativo da topologia.
     Suporta zoom (scroll), pan (drag), hover tooltip e selecao de no.
+    Menu de contexto (botao direito) em nos: remover, excluir, alias.
     """
+
+    # Sinais emitidos para a janela principal
+    host_removido          = pyqtSignal(str)   # ip removido da topologia
+    host_adicionado_exclusao = pyqtSignal(str) # ip adicionado a lista de exclusao
+    host_excluir_subrede   = pyqtSignal(str)   # ip marcado para exclusao via filtro
 
     COR_FUNDO       = QColor(15, 20, 35)
     COR_NO_LOCAL    = QColor(46,  204, 113)
     COR_NO_GATEWAY  = QColor(231,  76,  60)
     COR_NO_NORMAL   = QColor(52,  152, 219)
     COR_NO_INTERNET = QColor(155,  89, 182)
+    COR_NO_MANUAL   = QColor(243, 156,  18)   # laranja — host adicionado manualmente
     COR_TEXTO       = QColor(236, 240, 241)
     COR_LEGENDA     = QColor(120, 140, 160)
-    RAIO_BASE       = 16
-    RAIO_MIN        = 7
-    RAIO_MAX        = 30
-    MAX_DISPOSITIVOS = 50
+    RAIO_BASE       = 14
+    RAIO_MIN        = 14
+    RAIO_MAX        = 14
+    MAX_DISPOSITIVOS         = 100  # valor padrao; sobrescrito por ConfigManager
     MAX_CONEXOES_ARMAZENADAS = 300
-    TIMEOUT_INATIVIDADE = 1800
+    TIMEOUT_INATIVIDADE      = 1800
 
     _MACS_INVALIDOS = frozenset({
         "ff:ff:ff:ff:ff:ff",
@@ -288,16 +282,21 @@ class VisualizadorTopologia(QWidget):
 
         dados = self.dispositivos[ip]
         alias = (dados.get("alias") or "").strip()
-        chave_mac = chave_alias_dispositivo(mac=dados.get("mac", ""))
-        chave_ip = chave_alias_dispositivo(ip=ip)
+        mac = dados.get("mac", "")
+        
+        # Só persiste se houver um MAC válido
+        if not self._mac_e_valido(mac):
+            # Mantém o apelido apenas em memória até que o MAC seja identificado
+            return
+        
+        chave_mac = chave_alias_dispositivo(mac=mac)
+        if not chave_mac:
+            return
 
-        for chave in (chave_mac, chave_ip):
-            if not chave:
-                continue
-            if alias:
-                self._aliases_persistidos[chave] = alias
-            else:
-                self._aliases_persistidos.pop(chave, None)
+        if alias:
+            self._aliases_persistidos[chave_mac] = alias
+        else:
+            self._aliases_persistidos.pop(chave_mac, None)
 
         salvar_aliases(self._aliases_persistidos, self._arquivo_aliases)
 
@@ -315,7 +314,6 @@ class VisualizadorTopologia(QWidget):
         alias_persistido = obter_alias_persistido(
             self._aliases_persistidos,
             mac=dados.get("mac", ""),
-            ip=ip,
         )
         if "alias" not in dados:
             dados["alias"] = alias_persistido or ""
@@ -380,6 +378,9 @@ class VisualizadorTopologia(QWidget):
                 self.dispositivos[chave]["pacotes"] += 1
                 if mac:
                     self.dispositivos[chave]["mac"] = mac
+                    # Se o MAC acaba de ser identificado e há um apelido em memória, persistir
+                    if self.dispositivos[chave].get("alias"):
+                        self._persistir_alias_dispositivo(chave)
                 if hostname:
                     self.dispositivos[chave]["hostname"] = hostname
                 if cidr:
@@ -614,7 +615,11 @@ class VisualizadorTopologia(QWidget):
                     self.on_no_clicado(None)
             self.update()
         elif evento.button() == Qt.MouseButton.RightButton:
-            self._resetar_vista()
+            ip = self._no_em(pos)
+            if ip:
+                self._exibir_menu_contexto(ip, evento.globalPosition().toPoint())
+            else:
+                self._resetar_vista()
 
     def mouseMoveEvent(self, evento):
         pos = evento.position()
@@ -652,6 +657,135 @@ class VisualizadorTopologia(QWidget):
         self._offset = QPointF(0, 0)
         self._auto_zoom()
         self.update()
+
+    # ── Menu de contexto (botao direito no no) ────────────────────────────────
+
+    def _exibir_menu_contexto(self, ip: str, pos_global: QPoint):
+        """Exibe menu de contexto ao clicar com botao direito em um no."""
+        if ip == "internet":
+            return
+
+        dados = self.dispositivos.get(ip, {})
+        eh_manual = dados.get("manual", False)
+        nome = self._nome_preferencial_dispositivo(dados, ip)
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 6px;
+                color: #c9d1d9;
+                padding: 4px;
+                font-size: 12px;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 14px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #1f6feb;
+                color: #fff;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #30363d;
+                margin: 4px 0;
+            }
+        """)
+
+        # Título do menu
+        titulo = menu.addAction(f"{nome} ({ip})")
+        titulo.setEnabled(False)
+        titulo_font = QFont("Segoe UI", 10)
+        titulo_font.setBold(True)
+        titulo.setFont(titulo_font)
+        menu.addSeparator()
+
+        # Ação: Definir apelido
+        acao_alias = QAction("Definir Apelido...", self)
+        acao_alias.triggered.connect(lambda: self._alias_via_menu(ip))
+        menu.addAction(acao_alias)
+
+        # Ação: Copiar IP
+        acao_copiar = QAction("Copiar IP", self)
+        acao_copiar.triggered.connect(lambda: QApplication.clipboard().setText(ip))
+        menu.addAction(acao_copiar)
+
+        menu.addSeparator()
+
+        # Ação: Remover da topologia (temporário até reinício)
+        acao_remover = QAction("Remover da Topologia (sessão atual)", self)
+        acao_remover.triggered.connect(lambda: self._remover_no(ip))
+        menu.addAction(acao_remover)
+
+        # Ação: Adicionar ao filtro de exclusão persistente
+        acao_filtro = QAction("Adicionar ao filtro de exclusão", self)
+        acao_filtro.triggered.connect(lambda: self._adicionar_ao_filtro(ip))
+        menu.addAction(acao_filtro)
+
+        # Ação: Excluir permanentemente (salva no config)
+        acao_excluir = QAction("Excluir Permanentemente (salvar)", self)
+        acao_excluir.triggered.connect(lambda: self._excluir_no_permanente(ip))
+        menu.addAction(acao_excluir)
+
+        if eh_manual:
+            menu.addSeparator()
+            acao_remover_manual = QAction("Remover Host Manual", self)
+            acao_remover_manual.triggered.connect(lambda: self._remover_no(ip, eh_manual=True))
+            menu.addAction(acao_remover_manual)
+
+        menu.exec(pos_global)
+
+    def _alias_via_menu(self, ip: str):
+        if ip not in self.dispositivos:
+            return
+        alias_atual = self.dispositivos[ip].get("alias", "")
+        novo_alias, confirmou = QInputDialog.getText(
+            self, "Apelido do dispositivo",
+            f"Definir um apelido para {ip}:",
+            text=alias_atual,
+        )
+        if confirmou:
+            self._definir_alias_dispositivo(ip, novo_alias)
+            self._sincronizar_metadados_dispositivo(ip)
+            self._no_selecionado = ip
+            if self.on_no_clicado:
+                self.on_no_clicado(ip)
+            self.update()
+
+    def _remover_no(self, ip: str, eh_manual: bool = False):
+        """Remove o no da topologia sem salvar na lista de exclusao permanente."""
+        with self._lock_dispositivos:
+            if ip in self.dispositivos:
+                del self.dispositivos[ip]
+            self._posicoes_mundo.pop(ip, None)
+            self._ultimo_trafego.pop(ip, None)
+            self._remover_ip_de_subredes(ip)
+        if self._no_selecionado == ip:
+            self._no_selecionado = None
+            if self.on_no_clicado:
+                self.on_no_clicado(None)
+        self._cache_conexoes_invalido = True
+        if not self._timer_layout.isActive():
+            self._timer_layout.start()
+        self.update()
+        self.host_removido.emit(ip)
+
+    def _adicionar_ao_filtro(self, ip: str):
+        """Remove o nó da topologia e notifica a janela principal para adicionar o IP ao filtro."""
+        self._remover_no(ip)
+        self.host_excluir_subrede.emit(ip)
+        self.host_adicionado_exclusao.emit(ip)
+
+    def _excluir_no_permanente(self, ip: str):
+        """Remove o no e emite sinal para adiciona-lo a lista de exclusao permanente."""
+        self._remover_no(ip)
+        self.host_adicionado_exclusao.emit(ip)
+
+    def atualizar_limite_dispositivos(self, limite: int):
+        """Atualiza o limite maximo de dispositivos exibiveis."""
+        self.MAX_DISPOSITIVOS = max(10, int(limite))
 
     def definir_rede_local(self, cidr: str):
         try:
@@ -694,7 +828,7 @@ class VisualizadorTopologia(QWidget):
     def _pintar_vazio(self, p: QPainter):
         p.setPen(QPen(QColor(80, 100, 130)))
         p.setFont(QFont("Arial", 13))
-        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Nenhum dispositivo detectado.\nInicie a captura ou clique em 'Descobrir Rede'.")
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Nenhum dispositivo detectado.\nInicie a captura ou clique em 'F10'.")
 
     def _pintar_conexoes(self, p: QPainter):
         if not self.contagem_conexoes: return
@@ -788,15 +922,24 @@ class VisualizadorTopologia(QWidget):
                 p.drawText(QRectF(pos.x()-50, pos.y()+raio+3, 100, 13), Qt.AlignmentFlag.AlignCenter, nome)
 
     def _pintar_legenda(self, p: QPainter):
-        itens = [(self.COR_NO_LOCAL, "Este computador"), (self.COR_NO_NORMAL, "Dispositivo local"), (self.COR_NO_GATEWAY, "Gateway"), (self.COR_NO_INTERNET, "Internet")]
-        x, y = 12, self.height() - 96
+        itens = [
+            (self.COR_NO_LOCAL,    "Este computador"),
+            (self.COR_NO_NORMAL,   "Dispositivo local"),
+            (self.COR_NO_GATEWAY,  "Gateway"),
+            (self.COR_NO_INTERNET, "Internet"),
+            (self.COR_NO_MANUAL,   "Host manual"),
+        ]
+        x, y = 12, self.height() - 114
         p.setFont(QFont("Arial", 8))
         for cor, rotulo in itens:
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(cor)); p.drawEllipse(x, y, 10, 10)
             p.setPen(QPen(self.COR_LEGENDA)); p.drawText(x+15, y+9, rotulo); y += 18
 
     def _pintar_info(self, p: QPainter):
-        texto = f"Dispositivos: {self.total_dispositivos_nao_internet()}   Conexoes: {len(self.contagem_conexoes)}   Zoom: {int(self._zoom*100)}%"
+        texto = (
+            f"Hosts: {self.total_hosts()}   Nós: {self.total_dispositivos_nao_internet()}   "
+            f"Conexoes: {len(self.contagem_conexoes)}   Zoom: {int(self._zoom*100)}%"
+        )
         p.setPen(QPen(QColor(70, 90, 120)))
         p.setFont(QFont("Arial", 8))
         p.drawText(QRectF(self.width()-360, 8, 350, 16), Qt.AlignmentFlag.AlignRight, texto)
@@ -826,35 +969,70 @@ class VisualizadorTopologia(QWidget):
 
     def _pintar_dica(self, p: QPainter):
         p.setPen(QPen(QColor(55, 70, 100))); p.setFont(QFont("Arial", 7))
-        p.drawText(QRectF(8, self.height()-16, 350, 13), Qt.AlignmentFlag.AlignLeft, "Scroll: zoom  |  Arrastar: mover  |  Clique: detalhes  |  Duplo clique: apelido")
+        p.drawText(QRectF(8, self.height()-16, 500, 13), Qt.AlignmentFlag.AlignLeft,
+                   "Scroll: zoom  |  Arrastar: mover  |  Clique: detalhes  |  Duplo clique: apelido  |  Botão direito: menu")
+
+    def definir_gateway_local(self, gateway_ip: str):
+        self._ip_gateway = gateway_ip
+        if gateway_ip in self.dispositivos:
+            self.dispositivos[gateway_ip]["eh_gateway"] = True
+        self.update()
 
     def _cor_do_no(self, ip: str) -> QColor:
         if ip == "internet": return self.COR_NO_INTERNET
-        if ip == self._ip_local: return self.COR_NO_LOCAL
         if self._ip_eh_gateway(ip): return self.COR_NO_GATEWAY
+        if ip == self._ip_local: return self.COR_NO_LOCAL
+        if self.dispositivos.get(ip, {}).get("manual"): return self.COR_NO_MANUAL
         return self.COR_NO_NORMAL
 
     def _tipo_do_no(self, ip: str) -> str:
         dados = self.dispositivos.get(ip, {})
         if dados.get("tipo_identificado"): return dados["tipo_identificado"]
         if ip == "internet": return "Externo / Internet"
-        if ip == self._ip_local: return "Este computador"
         if self._ip_eh_gateway(ip): return "Gateway / Roteador"
+        if ip == self._ip_local: return "Este computador"
         return "Dispositivo local"
 
     def _ip_eh_gateway(self, ip: str) -> bool:
+        if not ip or ip == "internet":
+            return False
+        if hasattr(self, "_ip_gateway") and self._ip_gateway and ip == self._ip_gateway:
+            return True
         for info in self.subredes.values():
-            if info.get("gateway") == ip: return True
-        return ip.endswith(".1") or ip.endswith(".254")
+            if info.get("gateway") == ip:
+                return True
+        dados = self.dispositivos.get(ip, {})
+        if dados.get("eh_gateway"):
+            return True
+        hostname = str(dados.get("hostname", "")).strip().lower()
+        if hostname in {"gateway", "roteador", "router"}:
+            return True
+        if not any(info.get("gateway") for info in self.subredes.values()) and not getattr(self, "_ip_gateway", None):
+            return ip.endswith(".1") or ip.endswith(".254")
+        return False
+
+    def _ip_conta_como_host(self, ip: str) -> bool:
+        if not ip or ip == "internet":
+            return False
+        if self._ip_eh_gateway(ip):
+            return False
+        return True
+
+    def total_hosts(self) -> int:
+        return sum(1 for ip in self.dispositivos if self._ip_conta_como_host(ip))
+
+    def total_hosts_ativos(self) -> int:
+        return sum(
+            1
+            for ip, dados in self.dispositivos.items()
+            if self._ip_conta_como_host(ip) and dados.get("pacotes", 0) > 0
+        )
 
     def total_dispositivos_nao_internet(self) -> int:
         return sum(1 for ip in self.dispositivos if ip != "internet")
 
     def _raio_do_no(self, ip: str) -> float:
-        pacotes = self.dispositivos.get(ip, {}).get("pacotes", 0)
-        if pacotes <= 0: return float(self.RAIO_BASE)
-        bonus = math.log1p(pacotes) * 1.8
-        return min(float(self.RAIO_MAX), max(float(self.RAIO_MIN), self.RAIO_BASE + bonus))
+        return float(self.RAIO_BASE)
 
     def _mundo_para_tela(self, pt: QPointF) -> QPointF:
         return QPointF(pt.x() * self._zoom + self._offset.x(), pt.y() * self._zoom + self._offset.y())
@@ -871,23 +1049,67 @@ class VisualizadorTopologia(QWidget):
         return None
 
     def _recalcular_layout(self):
-        locais, tem_inet = [ip for ip in self.dispositivos if ip != "internet"], "internet" in self.dispositivos
-        raio_no, margem = self.RAIO_BASE+4, (self.RAIO_BASE+4)*2.8
-        r_anel, inc_anel = max(margem*2.2, 60.0), margem*2.4
-        aneis, restantes, idx = [], list(locais), 0
-        while restantes:
-            r = r_anel + idx * inc_anel
-            cap = max(1, int(2 * math.pi * r / margem))
-            aneis.append(restantes[:cap]); restantes = restantes[cap:]; idx += 1
+        locais = [ip for ip in self.dispositivos if ip != "internet"]
+        tem_inet = "internet" in self.dispositivos
+
+        if not locais:
+            self._posicoes_mundo = {ip: pos for ip, pos in self._posicoes_mundo.items() if ip == "internet"}
+            if tem_inet:
+                self._posicoes_mundo["internet"] = QPointF(0, 0)
+            self._auto_zoom()
+            return
+
+        raio_no = float(self.RAIO_BASE)
+        margem = raio_no + 12.0
+        largura = max(1.0, float(self.width()))
+        altura = max(1.0, float(self.height()))
+        raio_maximo = max(90.0, min(largura, altura) * 0.34)
+        raio_inicial = max(70.0, min(raio_maximo * 0.55, 140.0))
+        espacamento_ideal = max(2.0 * raio_no + 8.0, 34.0)
+
+        # Para poucos nós, um único círculo principal já oferece boa legibilidade.
+        # Para muitos nós, adiciona anéis concêntricos e ajusta o raio dinamicamente.
+        n = len(locais)
+        if n <= 8:
+            aneis = [locais]
+            raios = [raio_inicial]
+        else:
+            capacidade_anel = max(4, int((2.0 * math.pi * max(raio_inicial, raio_maximo * 0.55)) / espacamento_ideal))
+            qtd_aneis = max(1, int(math.ceil(n / capacidade_anel)))
+            passo_anel = max(58.0, (raio_maximo - raio_inicial) / max(1, qtd_aneis - 1)) if qtd_aneis > 1 else 0.0
+            aneis, raios = [], []
+            restante = list(locais)
+            for idx in range(qtd_aneis):
+                raio_anel = min(raio_maximo, raio_inicial + idx * passo_anel)
+                cap = max(3, int((2.0 * math.pi * max(raio_anel, raio_inicial)) / espacamento_ideal))
+                qtd_no = min(len(restante), cap)
+                if qtd_no <= 0:
+                    continue
+                aneis.append(restante[:qtd_no])
+                raios.append(raio_anel)
+                restante = restante[qtd_no:]
+            if restante:
+                aneis.append(restante)
+                raios.append(min(raio_maximo, raio_inicial + (len(aneis) - 1) * passo_anel))
+
+        # Distribui os nós de forma uniforme em cada anel.
+        self._posicoes_mundo = {ip: pos for ip, pos in self._posicoes_mundo.items() if ip == "internet"}
         for idx, ips in enumerate(aneis):
-            r = r_anel + idx * inc_anel
+            raio_anel = raios[idx]
             m = len(ips)
+            if m <= 0:
+                continue
+            deslocamento = idx * (math.pi / max(6, m))
             for i, ip in enumerate(ips):
-                ang = (2 * math.pi * i / max(m, 1)) - math.pi / 2
-                self._posicoes_mundo[ip] = QPointF(r * math.cos(ang), r * math.sin(ang))
+                ang = (2.0 * math.pi * i / max(m, 1)) - math.pi / 2.0 + deslocamento
+                self._posicoes_mundo[ip] = QPointF(
+                    math.cos(ang) * max(raio_anel, margem),
+                    math.sin(ang) * max(raio_anel, margem)
+                )
+
         if tem_inet:
-            r_ext = r_anel + max(len(aneis)-1, 0) * inc_anel
-            self._posicoes_mundo["internet"] = QPointF(r_ext * 1.55, 0)
+            self._posicoes_mundo["internet"] = QPointF(raio_maximo * 1.45, 0.0)
+
         self._auto_zoom()
 
     def _auto_zoom(self):
@@ -913,6 +1135,11 @@ class VisualizadorTopologia(QWidget):
 # ── Painel contentor ──────────────────────────────────────────────────────────
 
 class PainelTopologia(QWidget):
+    # Sinais repassados pela classe contêinera para a janela principal
+    host_removido            = pyqtSignal(str)
+    host_adicionado_exclusao = pyqtSignal(str)
+    host_excluir_subrede     = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._montar_layout()
@@ -925,8 +1152,16 @@ class PainelTopologia(QWidget):
         self.visualizador.setGeometry(0, 0, self._area.width(), self._area.height())
         self._painel_detalhes = PainelDetalhes(self._area); self._painel_detalhes.raise_()
         self.visualizador.on_no_clicado = self._on_no_clicado
+        # Repassa sinais do visualizador para a janela principal
+        self.visualizador.host_removido.connect(self.host_removido)
+        self.visualizador.host_adicionado_exclusao.connect(self.host_adicionado_exclusao)
+        self.visualizador.host_excluir_subrede.connect(self.host_excluir_subrede)
         layout.addWidget(self._area, 1)
-        rodape = QLabel("Apenas dispositivos que originaram pacotes são exibidos. IPs externos são agrupados em 'Internet'. Nós maiores = maior volume de tráfego. Clique em um nó para detalhes.")
+        rodape = QLabel(
+            "Apenas dispositivos que originaram pacotes são exibidos. "
+            "IPs externos são agrupados em 'Internet'. "
+            "Clique para detalhes | Botão direito para opções."
+        )
         rodape.setStyleSheet("color: #566573; font-size: 9px; padding: 3px 6px; background: rgba(10,14,24,180);")
         layout.addWidget(rodape)
 
@@ -955,7 +1190,34 @@ class PainelTopologia(QWidget):
         f, a = self.gerenciador.identificar_fabricante(mac) if mac else "", self.gerenciador.obter_apelido(mac) if mac else ""
         self.visualizador.registrar_origem(ip, mac, hostname or a, confirmado_por_arp=True)
         if ip in self.visualizador.dispositivos:
-            self.visualizador.dispositivos[ip]["fabricante"], self.visualizador.dispositivos[ip]["apelido"] = f, a
+            dados = self.visualizador.dispositivos[ip]
+            dados["fabricante"] = f
+            dados["apelido"]    = a
+            dados["manual"]     = True   # marca como host manual para cor diferenciada
+
+    def remover_host(self, ip: str):
+        """Remove um host da topologia diretamente (sem adicionar a exclusoes)."""
+        self.visualizador._remover_no(ip)
+
+    def atualizar_limite_dispositivos(self, limite: int):
+        """Propaga novo limite de dispositivos para o visualizador."""
+        self.visualizador.atualizar_limite_dispositivos(limite)
+
+    def recarregar_hosts_manuais(self, hosts_manuais: list):
+        """
+        Recebe lista de dicts {ip, hostname, mac, nota} e adiciona
+        os que ainda nao estao na topologia.
+        """
+        for h in hosts_manuais:
+            ip = h.get("ip", "")
+            if not ip:
+                continue
+            if ip not in self.visualizador.dispositivos:
+                self.adicionar_dispositivo_manual(
+                    ip=ip,
+                    mac=h.get("mac", ""),
+                    hostname=h.get("hostname") or h.get("nota") or ip,
+                )
 
     def definir_apelido_dispositivo(self, mac: str, apelido: str):
         self.gerenciador.salvar_apelido(mac, apelido)
@@ -973,7 +1235,8 @@ class PainelTopologia(QWidget):
     def atualizar_subredes(self, lista_subredes): self.visualizador.atualizar_subredes(lista_subredes)
     def atualizar(self): self.visualizador.update()
     def definir_rede_local(self, cidr: str): self.visualizador.definir_rede_local(cidr)
+    def definir_gateway_local(self, gateway_ip: str): self.visualizador.definir_gateway_local(gateway_ip)
     def limpar(self): self._painel_detalhes.hide(); self.visualizador.limpar()
-    def total_dispositivos(self) -> int: return self.visualizador.total_dispositivos_nao_internet()
+    def total_dispositivos(self) -> int: return self.visualizador.total_hosts()
     def total_dispositivos_ativos(self) -> int:
-        return sum(1 for ip, d in self.visualizador.dispositivos.items() if ip != "internet" and d.get("pacotes", 0) > 0)
+        return self.visualizador.total_hosts_ativos()

@@ -638,13 +638,13 @@ def obter_caminho_aliases_padrao() -> Path:
 
 def carregar_aliases(caminho: Optional[Path] = None) -> Dict[str, str]:
     """
-    Carrega os aliases do arquivo JSON.
+    Carrega os aliases do arquivo JSON, filtrando entradas baseadas em IP.
 
     Args:
         caminho: Caminho opcional do arquivo. Se None, usa CAMINHO_ALIASES.
 
     Returns:
-        Dicionário com chave (mac_normalizado ou ip) -> apelido.
+        Dicionário com apenas chaves MAC (mac:XXXXXXXXXXXX) -> apelido.
     """
     caminho = caminho or CAMINHO_ALIASES
     if not caminho.exists():
@@ -652,7 +652,15 @@ def carregar_aliases(caminho: Optional[Path] = None) -> Dict[str, str]:
 
     try:
         with open(caminho, "r", encoding="utf-8") as f:
-            return json.load(f)
+            dados_brutos = json.load(f)
+        
+        # Filtra apenas entradas baseadas em MAC, remove entradas IP
+        aliases_filtrados = {
+            chave: valor 
+            for chave, valor in dados_brutos.items() 
+            if isinstance(chave, str) and isinstance(valor, str) and chave.startswith("mac:")
+        }
+        return aliases_filtrados
     except Exception:
         return {}
 
@@ -680,35 +688,31 @@ def salvar_aliases(aliases: Dict[str, str], caminho: Optional[Path] = None) -> b
         return False
 
 
-def chave_alias_dispositivo(mac: str = "", ip: str = "") -> str:
+def chave_alias_dispositivo(mac: str = "") -> str:
     """
     Gera uma chave única para armazenar o alias de um dispositivo.
-    Prioriza o MAC (mais estável) e usa o IP como fallback.
+    Usa apenas o MAC como identidade do dispositivo.
 
     Args:
-        mac: Endereço MAC (opcional).
-        ip:  Endereço IP (opcional).
+        mac: Endereço MAC do dispositivo.
 
     Returns:
-        String no formato "mac:XXXXXXXXXXXX" ou "ip:xxx.xxx.xxx.xxx" ou "" se ambos vazios.
+        String no formato "mac:XXXXXXXXXXXX" ou "" se MAC inválido.
     """
     if mac:
         mac_norm = GerenciadorDispositivos._normalizar_mac(mac)
         if mac_norm:
             return f"mac:{mac_norm}"
-    if ip:
-        return f"ip:{ip}"
     return ""
 
 
-def obter_alias_persistido(aliases: Dict[str, str], mac: str = "", ip: str = "") -> str:
+def obter_alias_persistido(aliases: Dict[str, str], mac: str = "") -> str:
     """
-    Busca um alias no dicionário de aliases usando a chave apropriada.
+    Busca um alias no dicionário de aliases usando apenas o MAC.
 
     Args:
         aliases: Dicionário carregado via carregar_aliases().
         mac:     Endereço MAC do dispositivo.
-        ip:      Endereço IP do dispositivo.
 
     Returns:
         Alias encontrado ou "" se nenhum.
@@ -716,10 +720,6 @@ def obter_alias_persistido(aliases: Dict[str, str], mac: str = "", ip: str = "")
     chave_mac = chave_alias_dispositivo(mac=mac)
     if chave_mac and chave_mac in aliases:
         return aliases[chave_mac]
-
-    chave_ip = chave_alias_dispositivo(ip=ip)
-    if chave_ip and chave_ip in aliases:
-        return aliases[chave_ip]
 
     return ""
 

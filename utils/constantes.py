@@ -43,3 +43,10 @@ PORTAS_SSH: frozenset[int] = frozenset({22})
 PORTAS_FTP: frozenset[int] = frozenset({20, 21})
 PORTAS_SMB: frozenset[int] = frozenset({445})
 PORTAS_RDP: frozenset[int] = frozenset({3389})
+
+# ── Configuraçoes do Npcap ──────────────────────────────────────────────
+# Aumentar o buffer do Npcap para evitar perdas de pacotes
+NPCAP_BUFFER_SIZE = 16777216  # 16 MB (aumentado de ~2 MB padrão)
+# Nota: Para aplicar esta configuração, use:
+# conf.bufsize = NPCAP_BUFFER_SIZE
+# no código que inicializa o Scapy

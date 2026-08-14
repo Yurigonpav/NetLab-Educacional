@@ -340,6 +340,18 @@ class AnalisadorPacotes:
             entrada = self._top_dns[evento["dominio"]]
             entrada[0] += 1
             entrada[1] += tamanho
+        if evento:
+            evento.setdefault("tamanho", tamanho)
+            for chave in (
+                "ttl", "porta_origem", "porta_destino",
+                "mac_origem", "mac_destino", "dominio",
+                "tls_sni", "dhcp_tipo", "dhcp_xid",
+            ):
+                valor = dados.get(chave)
+                if valor not in (None, ""):
+                    evento.setdefault(chave, valor)
+            if dados.get("flags"):
+                evento.setdefault("flags_tcp", dados.get("flags"))
         return evento
 
     def processar_pacote(self, dados: dict) -> Optional[dict]:

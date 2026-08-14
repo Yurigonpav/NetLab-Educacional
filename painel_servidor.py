@@ -1370,10 +1370,9 @@ class HandlerVulneravel(BaseHTTPRequestHandler):
         <section class="hero">
             <div>
                 <span class="eyebrow">NetLab Educacional</span>
-                <h1>Servidor web local pronto para uso.</h1>
+                <h1>Servidor web vulnerável pronto para uso.</h1>
                 <p class="lead">
-                    Entre com uma conta, registre novos usu&aacute;rios e acompanhe o
-                    mural de coment&aacute;rios com um fluxo mais coerente.
+                    Este ambiente foi desenvolvido para fins educacionais e testes de segurança. Não utilize dados reais ou informações sensíveis.
                 </p>
                 <div class="actions">
                     <a class="primary-link" href="/login">Abrir login</a>

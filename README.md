@@ -10,7 +10,7 @@
 [![Scapy](https://img.shields.io/badge/Scapy-Captura%20de%20Pacotes-FF6B35?style=for-the-badge)](https://scapy.net/)
 
 **Trabalho de Conclusão de Curso — Curso Técnico em Informática**
-**Instituto Federal Farroupilha, Campus Avançado Uruguaiana**
+**Instituto Federal Farroupilha, Campus Uruguaiana**
 
 </div>
 
@@ -575,7 +575,7 @@ Para verificar se o projeto está em estado executável sem abrir a interface:
 **Yuri Gonçalves Pavão**
 
 Curso Técnico em Informática Integrado ao Ensino Médio
-Instituto Federal Farroupilha — Campus Avançado Uruguaiana
+Instituto Federal Farroupilha — Campus Uruguaiana
 
 Orientador: Prof. João Carlos
 Co-orientador: Prof. Michel Michelon

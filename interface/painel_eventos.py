@@ -1,5 +1,15 @@
 # interface/painel_eventos.py
 # Painel do Modo Análise — v7.0  (redesign visual minimalista)
+#
+# MUDANÇAS v7.0:
+#   - Visual completamente refeito: minimalista, compacto e sem poluição visual
+#   - Topbar comprimida (84 px → 68 px) — badges e busca em faixa única quando possível
+#   - _ItemWidget reduzido de 68 → 56 px com layout mais denso e limpo
+#   - Cabeçalho de detalhe compactado; padding e espaçamentos revistos
+#   - Barra de abas 40 → 32 px; rodapé 28 → 24 px
+#   - Scrollbar ultra-fina (4 px) com transição suave
+#   - resizeEvent adapta padding e texto do rodapé de forma responsiva
+#   - API pública idêntica à v6.1 (adicionar_evento, limpar, atualizar_stats)
 
 from collections import defaultdict, deque
 from html import escape
@@ -14,6 +24,7 @@ from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtGui import QColor
 
 from utils.rede import corrigir_mojibake
+from interface.glossario import marcar_termos, JanelaGlossario
 
 # ══════════════════════════════════════════════════════════════
 # TOKENS DE DESIGN — paleta do NetLab Educacional (v7.0)
@@ -417,6 +428,7 @@ class _AutoHeightTextBrowser(QTextBrowser):
         self._min_h = min_h
         self._ajustando_altura = False
         self.setOpenExternalLinks(False)
+        self.setOpenLinks(False)          # Não navega ao clicar — emite anchorClicked para o glossário
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -477,6 +489,7 @@ class PainelEventos(QWidget):
         self._contadores    = defaultdict(int)
         self._item_map      = []
         self._stats_cache   = {"pacotes": 0, "rede": "—", "dados": "0 B"}
+        self._janela_glossario_atual = None  # Mantém referência à janela de glossário aberta
 
         # Timer de debounce para a busca (evita filtrar a cada tecla)
         self._timer_busca = QTimer(self)
@@ -575,7 +588,7 @@ class PainelEventos(QWidget):
         l1.addWidget(self._campo_busca)
 
         # Botão para limpar a busca
-        self._btn_limpar_busca = QPushButton("✕")
+        self._btn_limpar_busca = QPushButton("X")
         self._btn_limpar_busca.setFixedSize(20, 20)
         self._btn_limpar_busca.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_limpar_busca.setVisible(False)
@@ -880,7 +893,8 @@ class PainelEventos(QWidget):
         """
 
         tb = _AutoHeightTextBrowser(min_h=420)
-        tb.setHtml(html)
+        tb.setHtml(marcar_termos(html))                          # ← marcar_termos adicionado
+        tb.anchorClicked.connect(self._ao_clicar_link_glossario) # ← sinal conectado
         tb.setStyleSheet(f"""
             QTextBrowser {{
                 background: {_BG};
@@ -1243,7 +1257,7 @@ class PainelEventos(QWidget):
         min_h: int = 60,
         max_h: int = 500,
     ) -> QTextBrowser:
-        """Cria um bloco HTML autoexpansível, sem rolagem interna."""
+        """Cria um bloco HTML autoexpansível com suporte ao glossário interativo."""
         tb = _AutoHeightTextBrowser(min_h=min_h)
         tb.setStyleSheet(f"""
             QTextBrowser {{
@@ -1255,7 +1269,9 @@ class PainelEventos(QWidget):
                 selection-background-color: {_SEL};
             }}
         """)
-        tb.setHtml(html)
+        # Injeta links clicáveis nos termos do glossário antes de renderizar
+        tb.setHtml(marcar_termos(html))
+        tb.anchorClicked.connect(self._ao_clicar_link_glossario)
         tb._ajustar_altura()
         return tb
 
@@ -1269,6 +1285,32 @@ class PainelEventos(QWidget):
         """Insere cabeçalho de seção + widget de conteúdo no layout de detalhe."""
         self._lay_c.insertWidget(pos * 2,     _SecaoHeader(titulo, cor))
         self._lay_c.insertWidget(pos * 2 + 1, widget)
+
+    def _ao_clicar_link_glossario(self, url):
+        """
+        Trata cliques em links de glossário dentro dos QTextBrowsers do painel.
+        Abre o modal contextual com a definição do termo clicado.
+        """
+        url_str = url.toString()
+        if not url_str.startswith("glossario://"):
+            return
+
+        # Extrai o nome do termo do esquema de URL personalizado
+        termo = url_str[len("glossario://"):]
+        if not termo:
+            return
+
+        # Fecha a janela anterior se ainda estiver visível
+        if self._janela_glossario_atual is not None:
+            try:
+                self._janela_glossario_atual.close()
+            except RuntimeError:
+                pass  # Widget já destruído pelo Qt — ignorar
+
+        # Cria e exibe o modal próximo ao cursor
+        janela = JanelaGlossario(termo, parent=self)
+        self._janela_glossario_atual = janela
+        janela.mostrar_proximo_cursor()
 
     # ─────────────────────────────────────────────────────────
     # CONTEÚDO DAS ABAS
@@ -1411,7 +1453,7 @@ class PainelEventos(QWidget):
             """Indica o que o sniffer NÃO consegue ver."""
             return (
                 f'<div style="margin-top:8px;color:{_DIM};font-size:10px;">'
-                f'<span style="color:{_OK}">✓</span> {txt}</div>'
+                f'<span style="color:{_OK}">OK</span> {txt}</div>'
             )
 
         # ══════════════════════════════════════════════════════

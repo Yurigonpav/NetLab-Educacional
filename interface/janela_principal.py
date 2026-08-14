@@ -1,5 +1,3 @@
-# interface/janela_principal.py
-
 import threading
 import time
 import ipaddress
@@ -7,6 +5,7 @@ import subprocess
 import re
 import ctypes
 import json
+import logging
 from collections import deque
 
 from PyQt6.QtWidgets import (
@@ -14,14 +13,42 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox,
     QMessageBox, QTabWidget,
     QDialog, QHBoxLayout,
-    QProgressBar, QScrollArea, QFrame
+    QDialogButtonBox, QLineEdit,
+    QProgressBar, QScrollArea, QFrame,
+    QApplication,
 )
 from PyQt6.QtCore import QTimer, pyqtSlot, QThread, pyqtSignal, QObject, QRunnable, QThreadPool, Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QFont
 import socket
 import os
 import platform
 from datetime import datetime
+
+from utils.fonte_ui import clamp_fonte, escalar_css_fonte
+from interface.conteudo_manual import montar_html_secao, CONTEUDO_MANUAL
+
+_log = logging.getLogger(__name__)
+try:
+    from utils.config_manager import ConfigManager
+    from interface.dialog_configuracoes import DialogConfiguracoes
+    CONFIG_MANAGER_DISPONIVEL = True
+except ImportError as _e_cfg:
+    CONFIG_MANAGER_DISPONIVEL = False
+    print(f"[NetLab] ConfigManager não disponível: {_e_cfg}")
+
+# Importações dos novos módulos de diagnóstico avançado
+try:
+    from utils.diagnostico_camada_fisica import DiagnosticoCamadaFisica
+    from utils.diagnostico_ip_config import DiagnosticoIPConfig
+    from utils.diagnostico_subrede import DiagnosticoSubrede
+    from utils.diagnostico_conectividade import DiagnosticoConectividade
+    from utils.diagnostico_dns import DiagnosticoDNS
+    from utils.diagnostico_trafego import DiagnosticoTrafego
+    from utils.diagnostico_descoberta import DiscoveriaRede
+    from utils.diagnostico_windows import DiagnosticoWindows
+    DIAGNOSTICOS_AVANCADOS_DISPONIVEL = True
+except ImportError:
+    DIAGNOSTICOS_AVANCADOS_DISPONIVEL = False
 
 # ============================================================================
 # Seção colapsável reutilizável para o diagnóstico
@@ -46,7 +73,7 @@ class _SecaoColapsavel(QWidget):
         self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._titulo_base = titulo
         self._atualizar_texto_botao(not colapsado)
-        self.btn.setStyleSheet(f"""
+        self._css_btn_base = f"""
             QPushButton {{
                 text-align: left;
                 font-weight: bold;
@@ -60,7 +87,8 @@ class _SecaoColapsavel(QWidget):
             }}
             QPushButton:hover {{ background: rgba(255,255,255, 0.08); }}
             QPushButton:!checked {{ border-radius: 4px; }}
-        """)
+        """
+        self.btn.setStyleSheet(self._css_btn_base)
         self.btn.toggled.connect(self._ao_alternar)
 
         # Container interno
@@ -97,10 +125,53 @@ class _SecaoColapsavel(QWidget):
     def add_layout(self, layout):
         self.c_lay.addLayout(layout)
 
+    def aplicar_fonte(self, tamanho_pt: int):
+        """Reaplica o stylesheet do cabeçalho com fonte escalada."""
+        self.btn.setStyleSheet(escalar_css_fonte(self._css_btn_base, tamanho_pt))
+
 
 # ============================================================================
 # Diálogo de Diagnóstico Avançado — totalmente refatorado
 # ============================================================================
+
+class _WorkerColetaDiagnostico(QThread):
+    concluido = pyqtSignal(dict)
+
+    def __init__(self, diag_inst, desc_interface, nome_iface, ip_local, eh_wifi, snap):
+        super().__init__()
+        self.diag = diag_inst
+        self.desc_interface = desc_interface
+        self.nome_iface = nome_iface
+        self.ip_local = ip_local
+        self.eh_wifi = eh_wifi
+        self.snap = snap
+
+    def run(self):
+        eh_admin       = self.diag._verificar_admin()
+        versao_npcap   = self.diag._versao_npcap()
+        versao_scapy   = self.diag._versao_scapy()
+        info_dns       = self.diag._testar_dns()
+        info_gateway   = self.diag._testar_ping_gateway(self.ip_local)
+        info_wifi      = self.diag._sinal_wifi() if self.eh_wifi else None
+        info_iface     = self.diag._stats_interface(self.nome_iface)
+        diagnosticos_av = self.diag._coletar_diagnosticos_avancados(self.nome_iface)
+
+        self.concluido.emit({
+            "desc_interface": self.desc_interface,
+            "nome_iface": self.nome_iface,
+            "ip_local": self.ip_local,
+            "eh_wifi": self.eh_wifi,
+            "snap": self.snap,
+            "eh_admin": eh_admin,
+            "versao_npcap": versao_npcap,
+            "versao_scapy": versao_scapy,
+            "info_dns": info_dns,
+            "info_gateway": info_gateway,
+            "info_wifi": info_wifi,
+            "info_iface": info_iface,
+            "diagnosticos_av": diagnosticos_av,
+        })
+
 
 class DiagnosticoAvançado(QDialog):
     """
@@ -132,8 +203,8 @@ class DiagnosticoAvançado(QDialog):
         super().__init__(janela_principal)
         self.main = janela_principal
         self.setWindowTitle("Diagnóstico do Sistema — NetLab Educacional")
-        self.setMinimumSize(600, 500)
-        self.resize(680, 750)
+        self.setMinimumSize(520, 420)
+        self.resize(620, 680)
 
         # Cache dos resultados para exportação
         self._ultimo_relatorio: dict = {}
@@ -266,9 +337,9 @@ class DiagnosticoAvançado(QDialog):
         btn_exportar.clicked.connect(self._exportar_para_txt)
         lay.addWidget(btn_exportar)
 
-        btn_atualizar = QPushButton("Atualizar")
-        btn_atualizar.clicked.connect(self.atualizar)
-        lay.addWidget(btn_atualizar)
+        self._btn_atualizar = QPushButton("Atualizar")
+        self._btn_atualizar.clicked.connect(self.atualizar)
+        lay.addWidget(self._btn_atualizar)
 
         btn_fechar = QPushButton("Fechar")
         btn_fechar.setStyleSheet(
@@ -283,22 +354,47 @@ class DiagnosticoAvançado(QDialog):
     # ── Atualização principal ────────────────────────────────────────────
 
     def atualizar(self):
-        """Recolhe todos os dados e reconstrói as seções do diagnóstico."""
-        self._lbl_timestamp.setText(f"Gerado em: {datetime.now().strftime('%H:%M:%S')}")
+        """Inicia a coleta de dados em uma thread separada."""
+        if hasattr(self, '_worker') and self._worker.isRunning():
+            return
 
-        # Coleta de dados
+        self._lbl_timestamp.setText("Gerando relatório, aguarde...")
+        self._lbl_saude.setText("Analisando...")
+        self._lbl_saude.setStyleSheet("font-size: 11px; font-weight: bold; color: #e67e22;")
+        if hasattr(self, '_btn_atualizar'):
+            self._btn_atualizar.setEnabled(False)
+
+        # Coleta de dados da UI na main thread
         desc_interface = self.main.combo_interface.currentText()
         nome_iface     = self.main._mapa_interface_nome.get(desc_interface, desc_interface)
         ip_local       = self.main._mapa_interface_ip.get(desc_interface, "") or _obter_ip_local_seguro()
         eh_wifi        = any(p in nome_iface.lower() for p in ("wi-fi", "wifi", "wireless", "ax", "802.11"))
-        eh_admin       = self._verificar_admin()
-        versao_npcap   = self._versao_npcap()
-        versao_scapy   = self._versao_scapy()
-        info_dns        = self._testar_dns()
-        info_gateway   = self._testar_ping_gateway()
-        info_wifi      = self._sinal_wifi() if eh_wifi else None
-        info_iface     = self._stats_interface(nome_iface)
-        snap           = self.main._snapshot_atual
+        snap           = getattr(self.main, '_snapshot_atual', {}).copy()
+
+        self._worker = _WorkerColetaDiagnostico(self, desc_interface, nome_iface, ip_local, eh_wifi, snap)
+        self._worker.concluido.connect(self._atualizar_ui_com_resultado)
+        self._worker.start()
+
+    def _atualizar_ui_com_resultado(self, dados: dict):
+        """Recolhe todos os dados e reconstrói as seções do diagnóstico."""
+        if hasattr(self, '_btn_atualizar'):
+            self._btn_atualizar.setEnabled(True)
+
+        self._lbl_timestamp.setText(f"Gerado em: {datetime.now().strftime('%H:%M:%S')}")
+
+        desc_interface = dados["desc_interface"]
+        nome_iface     = dados["nome_iface"]
+        ip_local       = dados["ip_local"]
+        eh_wifi        = dados["eh_wifi"]
+        eh_admin       = dados["eh_admin"]
+        versao_npcap   = dados["versao_npcap"]
+        versao_scapy   = dados["versao_scapy"]
+        info_dns       = dados["info_dns"]
+        info_gateway   = dados["info_gateway"]
+        info_wifi      = dados["info_wifi"]
+        info_iface     = dados["info_iface"]
+        snap           = dados["snap"]
+        diagnosticos_av = dados["diagnosticos_av"]
 
         # Monta relatorio para exportação
         self._ultimo_relatorio = {
@@ -314,6 +410,7 @@ class DiagnosticoAvançado(QDialog):
             "wifi":          info_wifi,
             "iface":         info_iface,
             "snap":          snap,
+            "diagnosticos_av": diagnosticos_av,
         }
 
         # Calcula pontuação de saúde
@@ -339,7 +436,7 @@ class DiagnosticoAvançado(QDialog):
         _checar(info_gateway["ok"] and (info_gateway.get("latencia_ms") or 0) <= 50, 1, "Gateway inacessível", "Latência alta ao gateway" if info_gateway["ok"] else "")
         _checar(info_iface.get("drops", 0) == 0, 1, "",
                 f"Drops detectados: {info_iface.get('drops', 0)} pacotes" if info_iface.get("drops", 0) > 0 else "")
-        
+
         # Verifica regra de firewall do servidor (se aplicável)
         try:
             painel_srv = getattr(self.main, 'painel_servidor', None)
@@ -356,7 +453,7 @@ class DiagnosticoAvançado(QDialog):
                         problemas.append(f"Firewall bloqueando o servidor (porta {porta_srv})")
                     elif not servidor_ativo and not fw_ok:
                         avisos.append("Regra de firewall ausente — se pretende acessar o servidor de outros dispositivos, inicie o servidor e permita a porta no firewall.")
-                        
+
         except Exception:
             pass
 
@@ -371,6 +468,11 @@ class DiagnosticoAvançado(QDialog):
             self._adicionar_secao_wifi(info_wifi)
         self._adicionar_secao_versoes(versao_npcap, versao_scapy)
         self._adicionar_secao_rede(info_dns, info_gateway)
+
+        # ── SEÇÕES DOS DIAGNÓSTICOS AVANÇADOS ──────────────────────────────
+        if DIAGNOSTICOS_AVANCADOS_DISPONIVEL and diagnosticos_av:
+            self._adicionar_secoes_diagnosticos_avancados(diagnosticos_av)
+
         if avisos or problemas:
             self._adicionar_secao_pendencias(problemas, avisos)
 
@@ -400,6 +502,116 @@ class DiagnosticoAvançado(QDialog):
         self._lbl_saude.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {cor_chunk};")
         self._lbl_placar.setText(f"{pontos_obtidos} / {pontos_total}")
 
+    # ── Coleta de Diagnósticos Avançados ──────────────────────────────────
+
+    def _coletar_diagnosticos_avancados(self, nome_iface: str) -> dict:
+        """Coleta dados dos diagnósticos avançados."""
+        if not DIAGNOSTICOS_AVANCADOS_DISPONIVEL:
+            return {}
+
+        resultado = {}
+
+        try:
+            # Camada Física
+            interfaces_fisicas = DiagnosticoCamadaFisica.obter_interfaces_windows()
+            resultado['camada_fisica'] = [i.para_dict() for i in interfaces_fisicas]
+        except Exception as e:
+            resultado['camada_fisica_erro'] = str(e)
+
+        try:
+            # Configuração IP
+            configs_ip = DiagnosticoIPConfig.obter_configuracao_ip_windows()
+            resultado['config_ip'] = [c.para_dict() for c in configs_ip]
+        except Exception as e:
+            resultado['config_ip_erro'] = str(e)
+
+        try:
+            # Windows
+            verificacao_win = DiagnosticoWindows.diagnostico_windows_completo()
+            resultado['verificacao_windows'] = verificacao_win.para_dict()
+        except Exception as e:
+            resultado['verificacao_windows_erro'] = str(e)
+
+        try:
+            # Descoberta de Rede
+            dispositivos = DiscoveriaRede.descoberta_completa()
+            resultado['dispositivos_rede'] = [d.para_dict() for d in dispositivos[:20]]  # Limita a 20
+        except Exception as e:
+            resultado['dispositivos_rede_erro'] = str(e)
+
+        return resultado
+
+    def _adicionar_secoes_diagnosticos_avancados(self, diagnosticos_av: dict):
+        """Adiciona seções com dados dos diagnósticos avançados."""
+
+        # ── Camada Física ──
+        if 'camada_fisica' in diagnosticos_av and diagnosticos_av['camada_fisica']:
+            secao = _SecaoColapsavel("  Camada Física (Layer 1)", "#E74C3C", colapsado=True)
+            linhas = []
+
+            for iface in diagnosticos_av['camada_fisica']:
+                linhas.append((f"{iface['nome_interface']}",
+                              f"Velocidade: {iface['velocidade_mbps']} Mbps | {iface['modo_duplex']}"))
+                if iface['erros_crc'] > 0:
+                    linhas.append(("Erros", f"{iface['erros_crc']} erros CRC"))
+
+            lbl = QLabel(self._tabela_html(linhas))
+            lbl.setWordWrap(True)
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            secao.add_widget(lbl)
+            self._inserir_secao(secao)
+
+        # ── Configuração IP ──
+        if 'config_ip' in diagnosticos_av and diagnosticos_av['config_ip']:
+            secao = _SecaoColapsavel("  Configuração IP (Layer 3)", "#3498DB", colapsado=True)
+            linhas = []
+
+            for config in diagnosticos_av['config_ip']:
+                linhas.append((config['nome_interface'],
+                              f"IPv4: {config['ipv4']} | CIDR: {config['cidr']}"))
+                if config['gateway_padrao']:
+                    linhas.append(("  Gateway", config['gateway_padrao']))
+                if config['dns_primario']:
+                    linhas.append(("  DNS", config['dns_primario']))
+
+            lbl = QLabel(self._tabela_html(linhas))
+            lbl.setWordWrap(True)
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            secao.add_widget(lbl)
+            self._inserir_secao(secao)
+
+        # ── Windows Checks ──
+        if 'verificacao_windows' in diagnosticos_av:
+            win = diagnosticos_av['verificacao_windows']
+            secao = _SecaoColapsavel("  Verificações Windows", "#9B59B6", colapsado=True)
+            linhas = [
+                ("Firewall", "Ativado" if win['firewall_ativado'] else "Desativado"),
+                ("Defender", "Ativado" if win['defender_ativado'] else "Desativado"),
+                ("Winsock", "OK" if win['winsock_ok'] else "Problema"),
+                ("Drivers NDIS", "OK" if win['drivers_ndis_ok'] else "Problema"),
+            ]
+
+            lbl = QLabel(self._tabela_html(linhas))
+            lbl.setWordWrap(True)
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            secao.add_widget(lbl)
+            self._inserir_secao(secao)
+
+        # ── Dispositivos na Rede ──
+        if 'dispositivos_rede' in diagnosticos_av and diagnosticos_av['dispositivos_rede']:
+            secao = _SecaoColapsavel("  Dispositivos Detectados", "#16A085", colapsado=True)
+            linhas = []
+
+            for disp in diagnosticos_av['dispositivos_rede'][:10]:
+                linhas.append((disp['ip'], f"MAC: {disp['mac']}"))
+
+            if linhas:
+                lbl = QLabel(self._tabela_html(linhas))
+                lbl.setWordWrap(True)
+                lbl.setTextFormat(Qt.TextFormat.RichText)
+                secao.add_widget(lbl)
+                self._inserir_secao(secao)
+
     # ── Construção das seções ────────────────────────────────────────────
 
     def _limpar_secoes(self):
@@ -427,7 +639,7 @@ class DiagnosticoAvançado(QDialog):
                                         "Verifique conexão com a internet" if not info_dns["ok"] else "")
         itens_html += self._item_check(info_gateway["ok"],
                                         f"Gateway: {info_gateway['texto']}",
-                                        "Roteador inacessível" if not info_gateway["ok"] else "")
+                                        "Rede institucional pode estar bloqueando ICMP. Se a internet funciona, ignore este aviso." if not info_gateway["ok"] else "")
         itens_html += "</div>"
 
         lbl = QLabel(itens_html)
@@ -641,7 +853,16 @@ class DiagnosticoAvançado(QDialog):
     def _versao_scapy(self) -> str:
         try:
             import scapy
-            return getattr(scapy, "VERSION", None) or scapy.__version__
+            # Tenta várias formas de obter a versão
+            versao = (
+                getattr(scapy, "VERSION", None) or
+                getattr(scapy, "__version__", None) or
+                "Instalado (versão não detectada)"
+            )
+            # Se for "0.0.0" (erro de parsing), retorna mensagem alternativa
+            if versao == "0.0.0":
+                return "Instalado (versão não detectada)"
+            return versao
         except Exception:
             return "N/A"
 
@@ -652,12 +873,15 @@ class DiagnosticoAvançado(QDialog):
         except Exception:
             return "N/A"
 
-    def _testar_ping_gateway(self) -> dict:
+    def _testar_ping_gateway(self, ip_local: str = None) -> dict:
         """
         Faz ping real ao gateway local (último octeto .1 ou .254 na tabela ARP).
         Retorna dicionário com ok, texto, latencia_ms.
+
+        Nota: Muitas redes institucionais bloqueiam ICMP (ping) por motivos de
+        segurança, então a falha aqui pode indicar política da rede, não erro.
         """
-        gateway = self._descobrir_gateway()
+        gateway = self._descobrir_gateway(ip_local)
         if not gateway:
             return {"ok": False, "texto": "Gateway não detectado", "latencia_ms": None}
         try:
@@ -684,18 +908,23 @@ class DiagnosticoAvançado(QDialog):
                 texto = f"{gateway} — {lat} ms · {perda_pct}% perda"
                 return {"ok": True, "texto": texto, "latencia_ms": lat, "gateway": gateway}
             else:
+                # Rede institucional pode estar bloqueando ICMP (ping)
                 return {
                     "ok": False,
-                    "texto": f"{gateway} — sem resposta ({perda_pct}% perda)",
+                    "texto": f"{gateway} — sem resposta ({perda_pct}% perda) [bloqueado ou offline]",
                     "latencia_ms": None,
                     "gateway": gateway,
                 }
         except Exception as e:
             return {"ok": False, "texto": f"Erro no ping: {e}", "latencia_ms": None}
 
-    def _descobrir_gateway(self) -> str:
-        desc_sel = self.main.combo_interface.currentText()
-        ip_local = self.main._mapa_interface_ip.get(desc_sel, "") or _obter_ip_local_seguro()
+    def _descobrir_gateway(self, ip_local: str = None) -> str:
+        if not ip_local:
+            try:
+                desc_sel = self.main.combo_interface.currentText()
+                ip_local = self.main._mapa_interface_ip.get(desc_sel, "") or _obter_ip_local_seguro()
+            except Exception:
+                ip_local = _obter_ip_local_seguro()
         prefixo_24 = ".".join(ip_local.split(".")[:3]) + "." if ip_local else ""
 
         # ── 1. PowerShell Get-NetRoute (mais confiável no Windows moderno) ──────
@@ -867,20 +1096,20 @@ class DiagnosticoAvançado(QDialog):
     def _exportar_para_txt(self):
         """Exporta diagnóstico completo para arquivo TXT."""
         from PyQt6.QtWidgets import QFileDialog
-        
+
         caminho = QFileDialog.getSaveFileName(
             self,
             "Salvar Diagnóstico",
             f"NetLab-Diagnostico-{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
             "Arquivos de Texto (*.txt);;Todos (*)"
         )[0]
-        
+
         if not caminho:
             return
-        
+
         try:
             rel = self._ultimo_relatorio
-            
+
             # Monta conteúdo do TXT
             linhas = [
                 "=" * 80,
@@ -896,33 +1125,33 @@ class DiagnosticoAvançado(QDialog):
                 "-" * 80,
                 "",
             ]
-            
+
             # Privilégios
-            linhas.append(f"Privilégios de Administrador: {'✓ SIM' if rel.get('eh_admin') else '✗ NÃO'}")
+            linhas.append(f"Privilégios de Administrador: {'SIM' if rel.get('eh_admin') else 'NÃO'}")
             if not rel.get('eh_admin'):
                 linhas.append("  → Dica: Execute o NetLab como Administrador para criar regras de firewall")
-            
+
             # Npcap
             linhas.append(f"Npcap: {rel.get('versao_npcap', 'N/A')}")
             if rel.get('versao_npcap') == 'N/A':
                 linhas.append("  → Erro: Npcap não instalado. Baixe em https://npcap.com")
                 linhas.append("  → Certifique-se de marcar 'WinPcap API-compatible mode' na instalação")
-            
+
             # Scapy
             linhas.append(f"Scapy: {rel.get('versao_scapy', 'N/A')}")
             if rel.get('versao_scapy') == 'N/A':
                 linhas.append("  → Erro: Scapy não instalado. Execute: pip install scapy")
-            
+
             linhas.extend(["", "-" * 80, "INTERFACE DE REDE", "-" * 80, ""])
-            
+
             linhas.append(f"Interface Selecionada: {rel.get('interface', 'N/A')}")
             linhas.append(f"Nome do Dispositivo: {rel.get('nome_iface', 'N/A')}")
             linhas.append(f"IP Local: {rel.get('ip_local', 'N/A')}")
-            
+
             snap = rel.get('snap', {})
             linhas.append(f"Total de Pacotes Capturados: {snap.get('total_pacotes', 0):,}")
             linhas.append(f"Volume Total: {snap.get('total_bytes', 0) / 1024 / 1024:.2f} MB")
-            
+
             iface_info = rel.get('iface', {})
             if iface_info.get('disponivel'):
                 drops = iface_info.get('drops', 0)
@@ -933,27 +1162,27 @@ class DiagnosticoAvançado(QDialog):
                 linhas.append(f"Erros de Recepção: {erros}")
                 if erros > 0:
                     linhas.append("  → Dica: Verifique drivers da placa de rede")
-            
+
             linhas.extend(["", "-" * 80, "CONECTIVIDADE", "-" * 80, ""])
-            
+
             gw_info = rel.get('gateway', {})
             linhas.append(f"Gateway: {gw_info.get('gateway', 'N/A')}")
-            linhas.append(f"Status: {'✓ Alcançável' if gw_info.get('ok') else '✗ Inacessível'}")
+            linhas.append(f"Status: {'Alcançável' if gw_info.get('ok') else 'Inacessível'}")
             if gw_info.get('ok'):
                 linhas.append(f"Latência: {gw_info.get('latencia_ms', 'N/A')} ms")
             else:
                 linhas.append("  → Erro: Gateway inacessível")
                 linhas.append("  → Dica: Verifique conexão com o roteador/internet")
-            
+
             dns_info = rel.get('dns', {})
-            linhas.append(f"DNS (google.com): {'✓ Funciona' if dns_info.get('ok') else '✗ Falha'}")
+            linhas.append(f"DNS (google.com): {'Funciona' if dns_info.get('ok') else 'Falha'}")
             if dns_info.get('ok'):
                 linhas.append(f"Resposta: {dns_info.get('texto', 'N/A')}")
                 linhas.append(f"Tempo: {dns_info.get('tempo_ms', 'N/A')} ms")
             else:
                 linhas.append("  → Erro: Resolução DNS falhou")
                 linhas.append("  → Dica: Verifique se tem acesso à internet")
-            
+
             wifi_info = rel.get('wifi', {})
             if wifi_info and wifi_info.get('disponivel'):
                 linhas.extend(["", "-" * 80, "WI-FI", "-" * 80, ""])
@@ -965,22 +1194,22 @@ class DiagnosticoAvançado(QDialog):
                 linhas.append(f"Canal: {wifi_info.get('canal', 'N/A')}")
                 linhas.append(f"Velocidade: {wifi_info.get('velocidade', 'N/A')}")
                 linhas.append("")
-                linhas.append("⚠️ LIMITAÇÃO WI-FI NO WINDOWS:")
+                linhas.append("[ATENÇÃO] LIMITAÇÃO WI-FI NO WINDOWS:")
                 linhas.append("   O driver impede captura de outros dispositivos em modo promíscuo.")
                 linhas.append("   Para demonstração em sala, use o Hotspot do Windows.")
-            
+
             linhas.extend(["", "-" * 80, "VERSÕES DOS COMPONENTES", "-" * 80, ""])
             linhas.append(f"Python: {platform.python_version()}")
             linhas.append(f"Npcap: {rel.get('versao_npcap', 'N/A')}")
             linhas.append(f"Scapy: {rel.get('versao_scapy', 'N/A')}")
             linhas.append(f"PyQt6: {self._versao_pyqt6()}")
-            
+
             linhas.extend(["", "-" * 80, "RECOMENDAÇÕES", "-" * 80, ""])
-            
+
             # Análise e recomendações
             problemas = []
             avisos_txt = []
-            
+
             if not rel.get('eh_admin'):
                 problemas.append("Não está executando como Administrador")
             if rel.get('versao_npcap') == 'N/A':
@@ -991,41 +1220,41 @@ class DiagnosticoAvançado(QDialog):
                 problemas.append("Gateway inacessível")
             if not dns_info.get('ok'):
                 problemas.append("DNS não funciona")
-            
+
             if iface_info.get('drops', 0) > 0:
                 avisos_txt.append(f"Detectados {iface_info.get('drops', 0)} pacotes descartados")
             if iface_info.get('erros', 0) > 0:
                 avisos_txt.append(f"Detectados {iface_info.get('erros', 0)} erros de recepção")
             if wifi_info and wifi_info.get('sinal_pct', 0) < 45:
                 avisos_txt.append("Sinal Wi-Fi fraco")
-            
+
             if problemas:
                 linhas.append("PROBLEMAS ENCONTRADOS:")
                 for p in problemas:
-                    linhas.append(f"  ✗ {p}")
+                    linhas.append(f"  - {p}")
                 linhas.append("")
-            
+
             if avisos_txt:
                 linhas.append("AVISOS:")
                 for a in avisos_txt:
-                    linhas.append(f"  ⚠ {a}")
+                    linhas.append(f"  [ATENÇÃO] {a}")
                 linhas.append("")
-            
+
             if not problemas:
-                linhas.append("✓ Nenhum problema detectado!")
+                linhas.append("[DICA] Nenhum problema detectado!")
                 linhas.append("")
                 linhas.append("Seu sistema está pronto para:")
                 linhas.append("  • Capturar tráfego de rede com sucesso")
                 linhas.append("  • Analisar dispositivos na topologia")
                 linhas.append("  • Acessar o servidor de outros dispositivos (inicie o servidor)")
-            
+
             linhas.extend(["", "=" * 80])
-            
+
             # Salva arquivo
             conteudo = "\n".join(linhas)
             with open(caminho, 'w', encoding='utf-8') as f:
                 f.write(conteudo)
-            
+
             QMessageBox.information(
                 self,
                 "Sucesso",
@@ -1058,7 +1287,7 @@ from interface.painel_eventos import PainelEventos
 from painel_servidor import PainelServidor
 from utils.constantes import PORTAS_HTTP, PORTAS_DHCP
 from utils.gerenciador_subredes import GerenciadorSubRedes, Visibilidade
-from utils.rede import obter_ip_local, detectar_cidr_robusto, converter_ip_mascara_para_cidr, formatar_bytes
+from utils.rede import obter_ip_local, detectar_cidr_robusto, converter_ip_mascara_para_cidr, formatar_bytes, detectar_gateway_robusto
 from utils.identificador import GerenciadorDispositivos
 
 
@@ -1186,9 +1415,10 @@ class _CapturadorPacotesThread(QThread):
     def run(self):
         self._rodando = True
         # Aumenta o ring buffer do Npcap para redes institucionais de alto volume
+        # Aumentado de 32 MB para 64 MB para reduzir perdas de pacotes
         try:
             from scapy.all import conf
-            conf.bufsize = 1024 * 1024 * 32  # 32 MB
+            conf.bufsize = 1024 * 1024 * 64  # 64 MB (aumentado de 32 MB)
         except Exception:
             pass
         while self._rodando:
@@ -1367,10 +1597,13 @@ class _DescobrirDispositivosThread(QThread):
     INTER_ARP     = 0.0
 
     def __init__(self, interface: str, cidr: str = "", habilitar_ping: bool = True,
-                 parametros: dict = None):
+                 parametros: dict = None, ip_local: str = "", ip_gateway: str = ""):
         super().__init__()
         self.interface = interface
         self.cidr      = cidr
+        self.ip_local  = ip_local
+        self.ip_gateway = ip_gateway
+        self._subredes_priorizadas: list[str] = []
         self._ips_encontrados: set  = set()
         self._dispositivos:    list = []
         self._cache_mac:       dict = {}
@@ -1393,6 +1626,11 @@ class _DescobrirDispositivosThread(QThread):
         self._limite_hosts     = self._param_arps["limite_hosts"]
         self._eh_wifi          = self._param_arps.get("wifi", False)
         self._periodo_timer_ms = self._param_arps.get("timer_ms", 30000)
+        self._subredes_priorizadas = [
+            str(cidr)
+            for cidr in self._param_arps.get("subredes_priorizadas", [])
+            if cidr
+        ]
 
     def run(self):
         try:
@@ -1403,32 +1641,60 @@ class _DescobrirDispositivosThread(QThread):
                 self.varredura_concluida.emit([])
                 return
 
-            rede_cidr = self.cidr or self._detectar_cidr() or self._cidr_por_ip_local()
-            if not rede_cidr:
+            redes_para_varrer: list[str] = []
+            for cidr in [self.cidr, *self._subredes_priorizadas]:
+                try:
+                    cidr_normalizado = str(ipaddress.ip_network(cidr, strict=False)) if cidr else ""
+                except Exception:
+                    cidr_normalizado = ""
+                if cidr_normalizado and cidr_normalizado not in redes_para_varrer:
+                    redes_para_varrer.append(cidr_normalizado)
+            if not redes_para_varrer:
+                rede_cidr = self._detectar_cidr() or self._cidr_por_ip_local()
+                if rede_cidr:
+                    redes_para_varrer.append(rede_cidr)
+            if not redes_para_varrer:
                 self.erro_ocorrido.emit(
                     "Não foi possível determinar a sub-rede. "
                     "Verifique se a interface está ativa."
                 )
                 return
 
-            self.progresso_atualizado.emit(f"Iniciando varredura em {rede_cidr} …")
-            self._varrer_arp(rede_cidr)
-            self._varrer_icmp(rede_cidr)
-
-            if not self._eh_wifi:
+            # ── Registrar prioritariamente o host local e o gateway padrão ──
+            if self.ip_local:
                 try:
-                    rede_obj = ipaddress.ip_network(rede_cidr, strict=False)
-                    if rede_obj.prefixlen >= 24:
-                        novo_prefixo   = max(21, rede_obj.prefixlen - 2)
-                        rede_expandida = str(rede_obj.supernet(new_prefix=novo_prefixo))
-                        if rede_expandida != rede_cidr:
-                            self.progresso_atualizado.emit(
-                                f"Expandindo busca: {rede_cidr} → {rede_expandida} …"
-                            )
-                            self._varrer_arp(rede_expandida)
-                            self._varrer_icmp(rede_expandida)
+                    from scapy.all import get_if_hwaddr
+                    mac_local = get_if_hwaddr(self.interface)
+                except Exception:
+                    mac_local = ""
+                self._registrar(self.ip_local, mac_local, socket.gethostname() if hasattr(socket, 'gethostname') else "Este Computador")
+
+            if self.ip_gateway:
+                mac_gw = ""
+                try:
+                    mac_gw = self._resolver_mac_unico(self.ip_gateway)
                 except Exception:
                     pass
+                self._registrar(self.ip_gateway, mac_gw, "Gateway")
+
+            for rede_cidr in redes_para_varrer:
+                self.progresso_atualizado.emit(f"Iniciando varredura em {rede_cidr} …")
+                self._varrer_arp(rede_cidr)
+                self._varrer_icmp(rede_cidr)
+                if not self._eh_wifi:
+                    try:
+                        rede_obj = ipaddress.ip_network(rede_cidr, strict=False)
+                        if rede_obj.prefixlen >= 24:
+                            novo_prefixo   = max(21, rede_obj.prefixlen - 2)
+                            rede_expandida = str(rede_obj.supernet(new_prefix=novo_prefixo))
+                            if rede_expandida != rede_cidr:
+                                self.progresso_atualizado.emit(
+                                    f"Expandindo busca: {rede_cidr} → {rede_expandida} …"
+                                )
+                                self._varrer_arp(rede_expandida)
+                                self._varrer_icmp(rede_expandida)
+                    except Exception:
+                        pass
 
             total = len(self._dispositivos)
             self.progresso_atualizado.emit(
@@ -1506,17 +1772,6 @@ class _DescobrirDispositivosThread(QThread):
                                 "ff:ff:ff:ff:ff:ff",
                                 "00:00:00:00:00:00",
                                 "",
-                            ):
-                                continue
-                            if not self._mac_gateway:
-                                partes_ip = ip_resp.split(".")
-                                if len(partes_ip) == 4:
-                                    ultimo_octeto = int(partes_ip[-1])
-                                    if ultimo_octeto in (1, 254):
-                                        self._mac_gateway = mac_resp.lower()
-                            if (
-                                self._mac_gateway
-                                and mac_resp.lower() == self._mac_gateway
                             ):
                                 continue
                             if self._ip_valido(ip_resp):
@@ -1723,6 +1978,8 @@ class _WorkerRunnable(QRunnable):
 
 class JanelaPrincipal(QMainWindow):
 
+    fonte_alterada = pyqtSignal(int)
+
     def __init__(self):
         super().__init__()
         self.analisador       = AnalisadorPacotes()
@@ -1764,6 +2021,18 @@ class JanelaPrincipal(QMainWindow):
         self._limite_hosts:       int   = _DescobrirDispositivosThread.MAX_HOSTS
         self._eh_wifi:            bool  = False
         self._periodo_timer_ms:   int   = 30000
+        self._fonte_tamanho_atual: int = 10
+
+        # ── ConfigManager: configuracões avançadas e filtros ──────────────────────
+        if CONFIG_MANAGER_DISPONIVEL:
+            self._config_manager = ConfigManager.instancia()
+        else:
+            self._config_manager = None
+
+        # Conjunto de IPs removidos manualmente nesta sessão (não persistido)
+        self._hosts_removidos_sessao: set = set()
+        # Diálogo de configurações (instanciado ao abrir)
+        self._dialog_configuracoes = None
 
         self.timer_consumir = QTimer()
         self.timer_consumir.timeout.connect(self._consumir_fila)
@@ -1791,6 +2060,8 @@ class JanelaPrincipal(QMainWindow):
         self._criar_barra_status()
         self._criar_barra_ferramentas()
         self._criar_area_central()
+        # Aplica configurações salvas na inicialização
+        self._aplicar_configuracoes_iniciais()
 
     # -------------------------------------------------------------------------
     # Configuração visual
@@ -1827,6 +2098,29 @@ class JanelaPrincipal(QMainWindow):
         m_mon.addAction(self.acao_captura)
 
         m_mon.addSeparator()
+
+        # Configurações avançadas — novo
+        self.acao_config = QAction("Configurações...", self)
+        self.acao_config.setShortcut("Ctrl+,")
+        if CONFIG_MANAGER_DISPONIVEL:
+            self.acao_config.setToolTip(
+                "Abre as configurações avançadas do NetLab (limite de hosts, filtros, etc.)"
+            )
+        else:
+            self.acao_config.setEnabled(False)
+            self.acao_config.setToolTip(
+                "Configurações indisponíveis — módulo utils/config_manager.py ou "
+                "interface/dialog_configuracoes.py não pôde ser carregado."
+            )
+        self.acao_config.triggered.connect(self._abrir_configuracoes)
+        m_mon.addAction(self.acao_config)
+
+        a_host_manual = QAction("Adicionar Host Manual...", self)
+        a_host_manual.setToolTip("Adiciona um host manualmente à topologia e salva no catálogo de hosts manuais")
+        a_host_manual.triggered.connect(self._adicionar_host_manual_dialog)
+        m_mon.addAction(a_host_manual)
+
+        m_mon.addSeparator()
         a_atualizar_oui = QAction("Atualizar Base de Fabricantes", self)
         a_atualizar_oui.setToolTip(
             "Baixa a base OUI mais recente do Wireshark (requer internet)."
@@ -1835,7 +2129,22 @@ class JanelaPrincipal(QMainWindow):
         m_mon.addAction(a_atualizar_oui)
 
         m_ajd = menu.addMenu("&Ajuda")
-        
+
+        m_ajd.addSeparator()
+        a_fonte_maior = QAction("Fonte Maior", self)
+        a_fonte_maior.setShortcut("Ctrl+=")
+        a_fonte_maior.setToolTip("Aumenta o tamanho da fonte da interface (acessibilidade)")
+        a_fonte_maior.triggered.connect(lambda: self._ajustar_fonte(1))
+        m_ajd.addAction(a_fonte_maior)
+
+        a_fonte_menor = QAction("Fonte Menor", self)
+        a_fonte_menor.setShortcut("Ctrl+-")
+        a_fonte_menor.setToolTip("Diminui o tamanho da fonte da interface (acessibilidade)")
+        a_fonte_menor.triggered.connect(lambda: self._ajustar_fonte(-1))
+        m_ajd.addAction(a_fonte_menor)
+
+        m_ajd.addSeparator()
+
         a_manual = QAction("Manual de Uso", self)
         a_manual.triggered.connect(self._exibir_manual)
         m_ajd.addAction(a_manual)
@@ -1871,6 +2180,20 @@ class JanelaPrincipal(QMainWindow):
         btn_diag.clicked.connect(self._exibir_diagnostico_captura)
         barra.addWidget(btn_diag)
 
+        # Botão de Configurações — novo
+        barra.addSeparator()
+        self.btn_config = QPushButton("Configurações")
+        if CONFIG_MANAGER_DISPONIVEL:
+            self.btn_config.setToolTip("Abrir configurações avançadas (Ctrl+,)")
+        else:
+            self.btn_config.setEnabled(False)
+            self.btn_config.setToolTip(
+                "Configurações indisponíveis — módulo de configurações não carregado."
+            )
+        self.btn_config.setObjectName("btn_config")
+        self.btn_config.clicked.connect(self._abrir_configuracoes)
+        barra.addWidget(self.btn_config)
+
     def _criar_area_central(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -1890,12 +2213,20 @@ class JanelaPrincipal(QMainWindow):
         self.abas.addTab(self.painel_eventos,   " Modo Análise")
         self.abas.addTab(self.painel_servidor,  "Servidor")
 
+        # Conecta sinais do painel de topologia
+        self.painel_topologia.host_removido.connect(self._ao_host_removido)
+        self.painel_topologia.host_adicionado_exclusao.connect(self._ao_host_excluido_permanente)
+        self.painel_topologia.host_excluir_subrede.connect(self._ao_host_excluido_filtro)
+
     def _criar_barra_status(self):
         barra = self.statusBar()
         self.lbl_status  = QLabel("Pronto. Clique em 'Iniciar Captura' para começar.")
         self.lbl_pacotes = QLabel("Pacotes: 0")
         self.lbl_dados   = QLabel("  Dados: 0 KB  ")
+        self.lbl_hosts_info = QLabel("")
+        self.lbl_hosts_info.setStyleSheet("color: #7f8c8d; padding: 0 6px;")
         barra.addWidget(self.lbl_status)
+        barra.addPermanentWidget(self.lbl_hosts_info)
         barra.addPermanentWidget(self.lbl_pacotes)
         barra.addPermanentWidget(self.lbl_dados)
 
@@ -1907,6 +2238,337 @@ class JanelaPrincipal(QMainWindow):
     def _ao_mudar_aba(self, idx: int):
         if self.abas.widget(idx) is self.painel_eventos:
             self.painel_eventos._reaplicar_filtros()
+
+    # -------------------------------------------------------------------------
+    # Configurações Avançadas — ConfigManager e DialogConfiguracoes
+    # -------------------------------------------------------------------------
+
+    def _aplicar_configuracoes_iniciais(self):
+        """Carrega e aplica configurações salvas ao iniciar o NetLab."""
+        if not self._config_manager:
+            return
+        cfg = self._config_manager
+        # Aplica limite de hosts inicial
+        self._limite_hosts = cfg.limite_hosts
+        # Aplica limite no visualizador
+        try:
+            self.painel_topologia.atualizar_limite_dispositivos(cfg.limite_hosts)
+        except Exception as e:
+            _log.warning("[NetLab] Erro ao aplicar limite de hosts na inicialização: %s", e)
+        # Carrega hosts manuais na topologia
+        try:
+            self.painel_topologia.recarregar_hosts_manuais(cfg.hosts_manuais)
+        except Exception as e:
+            _log.warning("[NetLab] Erro ao carregar hosts manuais na inicialização: %s", e)
+        # Aplica tamanho de fonte salvo
+        self._aplicar_fonte(cfg.fonte_tamanho)
+        # Atualiza indicador de status
+        self._atualizar_status_hosts()
+
+    @staticmethod
+    def _caminho_qss() -> str:
+        """Retorna o caminho do arquivo QSS do tema (compatível com PyInstaller)."""
+        import sys
+        try:
+            base = sys._MEIPASS  # type: ignore[attr-defined]
+        except Exception:
+            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base, "recursos", "estilos", "tema_escuro.qss")
+
+    def _gerar_stylesheet(self, tamanho_pt: int) -> str:
+        """Gera o stylesheet principal com tamanho de fonte parametrizado."""
+        try:
+            with open(self._caminho_qss(), "r", encoding="utf-8") as arquivo:
+                qss = arquivo.read()
+        except Exception as e:
+            _log.warning("[NetLab] Erro ao carregar QSS: %s", e)
+            return ""
+        return escalar_css_fonte(qss, tamanho_pt)
+
+    def _aplicar_fonte(self, tamanho_pt: int):
+        """Aplica o tamanho de fonte global e reconstrói o stylesheet da aplicação."""
+        tamanho_pt = clamp_fonte(tamanho_pt)
+        self._fonte_tamanho_atual = tamanho_pt
+        app = QApplication.instance()
+        if app:
+            app.setFont(QFont("Segoe UI", tamanho_pt))
+            qss = self._gerar_stylesheet(tamanho_pt)
+            if qss:
+                app.setStyleSheet(qss)
+        if hasattr(self, "lbl_hosts_info"):
+            tamanho_status = max(8, tamanho_pt - 1)
+            self.lbl_hosts_info.setStyleSheet(
+                f"color: #7f8c8d; font-size: {tamanho_status}pt; padding: 0 6px;"
+            )
+        self.fonte_alterada.emit(tamanho_pt)
+
+    def _ajustar_fonte(self, delta: int):
+        """Ajusta a fonte em ±1 pt via atalho de menu, persistindo a preferência."""
+        if not self._config_manager:
+            return
+        atual = self._config_manager.fonte_tamanho
+        novo = clamp_fonte(atual + delta)
+        if novo == atual:
+            return
+        self._config_manager.definir("fonte_tamanho", novo)
+        self._config_manager.salvar()
+        self._aplicar_fonte(novo)
+        self._status(f"Tamanho da fonte: {novo} pt")
+
+    def _adicionar_host_manual_dialog(self):
+        """Abre um formulário simples para incluir um host manual na topologia."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Adicionar Host Manual")
+        dlg.setModal(True)
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(8)
+
+        campos = [
+            ("IP", "ip"),
+            ("Hostname", "hostname"),
+            ("MAC", "mac"),
+            ("Nota", "nota"),
+        ]
+        edits: dict[str, QLineEdit] = {}
+        for rotulo, chave in campos:
+            linha = QHBoxLayout()
+            lbl = QLabel(rotulo)
+            lbl.setFixedWidth(90)
+            edit = QLineEdit()
+            linha.addWidget(lbl)
+            linha.addWidget(edit, 1)
+            layout.addLayout(linha)
+            edits[chave] = edit
+
+        botoes = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        botoes.accepted.connect(dlg.accept)
+        botoes.rejected.connect(dlg.reject)
+        layout.addWidget(botoes)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        ip = edits["ip"].text().strip()
+        hostname = edits["hostname"].text().strip()
+        mac = edits["mac"].text().strip()
+        nota = edits["nota"].text().strip()
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            QMessageBox.warning(self, "IP inválido", f"'{ip}' não é um endereço IPv4 válido.")
+            return
+
+        nome_exibicao = hostname or nota or ip
+        self.painel_topologia.adicionar_dispositivo_manual(ip, mac, nome_exibicao)
+        if self._config_manager:
+            self._config_manager.adicionar_host_manual(ip, hostname, mac, nota)
+            self._config_manager.salvar()
+        self._atualizar_status_hosts()
+        self._status(f"Host manual adicionado: {ip}")
+
+    def _abrir_configuracoes(self):
+        """Abre a janela de configurações avançadas."""
+        if not CONFIG_MANAGER_DISPONIVEL or not self._config_manager:
+            return
+
+        if self._dialog_configuracoes is not None and self._dialog_configuracoes.isVisible():
+            self._dialog_configuracoes.raise_()
+            self._dialog_configuracoes.activateWindow()
+            return
+
+        try:
+            dlg = DialogConfiguracoes(
+                self._config_manager,
+                parent=self,
+                tamanho_fonte=self._fonte_tamanho_atual,
+            )
+            dlg.configuracoes_aplicadas.connect(self._aplicar_configuracoes)
+            self.fonte_alterada.connect(dlg.aplicar_fonte)
+            self._dialog_configuracoes = dlg
+            dlg.finished.connect(self._ao_fechar_configuracoes)
+            dlg.exec()
+        except Exception as e:
+            self._dialog_configuracoes = None
+            _log.error("[NetLab] Falha ao abrir configurações: %s", e, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Erro ao abrir configurações",
+                "Não foi possível abrir a janela de configurações.\n\n"
+                f"Detalhes: {e}",
+            )
+
+    def _ao_fechar_configuracoes(self):
+        """Limpa referência ao diálogo e desconecta sinal de fonte."""
+        dlg = self._dialog_configuracoes
+        if dlg is not None:
+            try:
+                self.fonte_alterada.disconnect(dlg.aplicar_fonte)
+            except (TypeError, RuntimeError):
+                pass
+        self._dialog_configuracoes = None
+
+    @pyqtSlot(dict)
+    def _aplicar_configuracoes(self, config: dict):
+        """Recebe e aplica o dict de configurações emitido pelo diálogo."""
+        if not self._config_manager:
+            return
+
+        cfg = self._config_manager
+
+        # 1. Limite de hosts
+        novo_limite = max(10, int(config.get("limite_hosts", cfg.limite_hosts)))
+        self._limite_hosts = novo_limite
+        try:
+            self.painel_topologia.atualizar_limite_dispositivos(novo_limite)
+        except Exception as e:
+            _log.warning("[NetLab] Erro ao aplicar limite de hosts: %s", e)
+
+        # 2. Timer de redescoberta
+        novo_timer_s = max(5, int(config.get("timer_redescoberta_s", 30)))
+        self._periodo_timer_ms = novo_timer_s * 1000
+        if hasattr(self, "timer_descoberta") and self.em_captura:
+            self.timer_descoberta.setInterval(self._periodo_timer_ms)
+
+        # 2.1 Timeout ARP
+        novo_timeout_arp = config.get("timeout_arp_s", 1.8)
+        self._param_arps["timeout"] = novo_timeout_arp
+
+        # 2.2 Parâmetros ARP avançados
+        self._param_arps["batch"] = config.get("arp_batch", 32)
+        self._param_arps["tentativas"] = config.get("arp_tentativas", 2)
+        self._param_arps["inter"] = config.get("arp_inter", 0.02)
+        self._param_arps["pausa"] = config.get("arp_pausa", 1.0)
+
+        # 2.3 Filtros de sub-redes e OUI
+        self._param_arps["subredes_priorizadas"] = config.get("subredes_priorizadas", [])
+        self._param_arps["subredes_excluidas"] = config.get("subredes_excluidas", [])
+        self._param_arps["filtro_oui"] = config.get("filtro_oui", [])
+        self._param_arps["apenas_subrede_local"] = config.get("apenas_subrede_local", False)
+
+        # 3. Hosts excluídos: remove da topologia todos que estão na lista de exclusão
+        visualizador_topologia = getattr(self.painel_topologia, "visualizador", None)
+        if visualizador_topologia is not None:
+            for ip in cfg.hosts_excluidos:
+                if ip in visualizador_topologia.dispositivos:
+                    try:
+                        self.painel_topologia.remover_host(ip)
+                    except Exception as e:
+                        _log.warning("[NetLab] Erro ao remover host excluído %s: %s", ip, e)
+
+        # 4. Hosts manuais: sincroniza com a configuração atual
+        try:
+            ips_manuais_config = {
+                h.get("ip", "")
+                for h in cfg.hosts_manuais
+                if h.get("ip")
+            }
+            visualizador = getattr(self.painel_topologia, "visualizador", None)
+            if visualizador:
+                for ip, dados in list(visualizador.dispositivos.items()):
+                    if dados.get("manual") and ip not in ips_manuais_config:
+                        self.painel_topologia.remover_host(ip)
+        except Exception as e:
+            _log.warning("[NetLab] Erro ao sincronizar remoção de hosts manuais: %s", e)
+
+        try:
+            self.painel_topologia.recarregar_hosts_manuais(cfg.hosts_manuais)
+        except Exception as e:
+            _log.warning("[NetLab] Erro ao recarregar hosts manuais: %s", e)
+
+        # 5. Tamanho de fonte
+        novo_tamanho_fonte = clamp_fonte(config.get("fonte_tamanho", cfg.fonte_tamanho))
+        if novo_tamanho_fonte != self._fonte_tamanho_atual:
+            self._aplicar_fonte(novo_tamanho_fonte)
+
+        # 7. Atualiza indicador de status
+        self._atualizar_status_hosts()
+
+        self._status(
+            f"Configurações aplicadas: limite={novo_limite} hosts, "
+            f"excluídos={len(cfg.hosts_excluidos)}, "
+            f"manuais={len(cfg.hosts_manuais)}, "
+            f"filtros de sub-rede={len(cfg.subredes_excluidas)}"
+        )
+
+    @pyqtSlot(str)
+    def _ao_host_removido(self, ip: str):
+        """Chamado quando um host é removido da topologia via menu de contexto."""
+        self._hosts_removidos_sessao.add(ip)
+        self._atualizar_status_hosts()
+        self._status(f"Host {ip} removido da topologia.")
+
+    @pyqtSlot(str)
+    def _ao_host_excluido_filtro(self, ip: str):
+        """Adiciona o IP à lista de exclusão persistida quando o usuário usa o filtro do menu."""
+        self._hosts_removidos_sessao.add(ip)
+        if self._config_manager:
+            self._config_manager.adicionar_host_excluido(ip)
+            self._config_manager.salvar()
+        self._atualizar_status_hosts()
+        self._status(f"{ip} adicionado ao filtro de exclusão.")
+
+    @pyqtSlot(str)
+    def _ao_host_excluido_permanente(self, ip: str):
+        """
+        Chamado quando o usuário escolhe 'Excluir Permanentemente' no menu de contexto.
+        Salva o IP na lista de exclusão do ConfigManager.
+        """
+        self._hosts_removidos_sessao.add(ip)
+        if self._config_manager:
+            self._config_manager.adicionar_host_excluido(ip)
+            self._config_manager.salvar()
+        self._atualizar_status_hosts()
+        self._status(f"{ip} adicionado à lista de exclusão permanente.")
+
+    def _atualizar_status_hosts(self):
+        """Atualiza o indicador de hosts na barra de status com contadores avançados."""
+        if not hasattr(self, "lbl_hosts_info"):
+            return
+        try:
+            total = self.painel_topologia.total_dispositivos()
+            ativos = self.painel_topologia.total_dispositivos_ativos() if hasattr(self.painel_topologia, "total_dispositivos_ativos") else total
+            excluidos = len(self._config_manager.hosts_excluidos) if self._config_manager else 0
+            manuais = sum(
+                1 for ip, d in self.painel_topologia.visualizador.dispositivos.items()
+                if ip != "internet" and d.get("manual")
+            ) if hasattr(self.painel_topologia, "visualizador") else 0
+            removidos_sessao = len(self._hosts_removidos_sessao)
+            limite = self._limite_hosts
+
+            partes = [f"Hosts: {total}/{limite}", f"Ativos: {ativos}"]
+            if excluidos:
+                partes.append(f"{excluidos} excluídos")
+            if manuais:
+                partes.append(f"{manuais} manuais")
+            if removidos_sessao:
+                partes.append(f"{removidos_sessao} removidos")
+
+            self.lbl_hosts_info.setText("  |  ".join(partes) + "  ")
+        except Exception:
+            pass
+
+    def _ip_deve_ser_exibido(self, ip: str, mac: str = "") -> bool:
+        """
+        Retorna True se o IP deve ser adicionado à topologia, considerando:
+        - Lista de exclusão de IPs (sessão + persistida)
+        - Lista de exclusão de sub-redes
+        - Modo "apenas sub-rede local"
+        - Filtro por OUI/MAC
+        """
+        # Verificar lista de remoção da sessão atual
+        if ip in self._hosts_removidos_sessao:
+            return False
+
+        # Verificar via ConfigManager
+        if self._config_manager:
+            return self._config_manager.ip_deve_ser_exibido(
+                ip=ip,
+                mac=mac,
+                cidr_local=self._cidr_captura,
+            )
+        return True
 
     # -------------------------------------------------------------------------
     # Detecção de interfaces e CIDR
@@ -2393,12 +3055,21 @@ class JanelaPrincipal(QMainWindow):
         except ValueError:
             return
 
-        gateway_candidato = None
-        if rede_local.num_addresses > 2:
-            try:
-                gateway_candidato = str(rede_local.network_address + 1)
-            except Exception:
-                gateway_candidato = None
+        desc_sel = self.combo_interface.currentText()
+        ip_local = (
+            self._mapa_interface_ip.get(desc_sel.strip(), "")
+            or self._mapa_interface_ip.get(desc_sel, "")
+            or obter_ip_local()
+        )
+        gateway_candidato = detectar_gateway_robusto(ip_local)
+
+        if not gateway_candidato or not (ipaddress.ip_address(gateway_candidato) in rede_local):
+            gateway_candidato = None
+            if rede_local.num_addresses > 2:
+                try:
+                    gateway_candidato = str(rede_local.network_address + 1)
+                except Exception:
+                    gateway_candidato = None
 
         self.gerenciador_subredes.adicionar_subrede(
             self._cidr_captura,
@@ -2419,6 +3090,17 @@ class JanelaPrincipal(QMainWindow):
     ) -> bool:
         if not ip or not _ip_eh_topologizavel(ip):
             return False
+
+        # ── Aplicar filtros do ConfigManager ─────────────────────────────────
+        # Hosts locais (este computador e gateway) nunca são filtrados
+        ip_local = obter_ip_local()
+        eh_host_local    = (ip == ip_local)
+        eh_host_gateway  = confirmado_por_arp and (hostname == "Gateway")
+
+        if not (eh_host_local or eh_host_gateway):
+            if not self._ip_deve_ser_exibido(ip, mac):
+                return False
+        # ─────────────────────────────────────────────────────────────────────
 
         subrede  = None
         eh_local = False
@@ -2554,12 +3236,90 @@ class JanelaPrincipal(QMainWindow):
         self.painel_topologia.definir_rede_local(self._cidr_captura)
         self._registrar_subrede_local()
 
+        # Registrar imediatamente o host local e o gateway padrão como CONFIRMADOS
+        ip_local = (
+            self._mapa_interface_ip.get(desc_sel.strip(), "")
+            or self._mapa_interface_ip.get(desc_sel, "")
+            or obter_ip_local()
+        )
+        gateway_candidato = detectar_gateway_robusto(ip_local)
+
+        if ip_local and ip_local != "127.0.0.1":
+            try:
+                from scapy.all import get_if_hwaddr
+                mac_local = get_if_hwaddr(nome_dispositivo)
+            except Exception:
+                mac_local = ""
+            hostname_local = socket.gethostname() if hasattr(socket, 'gethostname') else "Este Computador"
+            self._registrar_host_confirmado(
+                ip=ip_local,
+                mac=mac_local,
+                hostname=hostname_local,
+                confirmado_por_arp=True,
+                atualizar_subredes=False
+            )
+
+        if gateway_candidato:
+            gateway_mac = ""
+            try:
+                for entrada in self._obter_tabela_arp_sistema():
+                    if entrada["ip"] == gateway_candidato:
+                        gateway_mac = entrada["mac"]
+                        break
+            except Exception:
+                pass
+
+            if not gateway_mac:
+                try:
+                    from scapy.all import ARP, Ether, srp1
+                    resposta = srp1(
+                        Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=gateway_candidato),
+                        iface=nome_dispositivo,
+                        timeout=0.2,
+                        retry=0,
+                        verbose=False,
+                    )
+                    if resposta and resposta.haslayer(ARP):
+                        gateway_mac = resposta[ARP].hwsrc
+                except Exception:
+                    pass
+
+            self._registrar_host_confirmado(
+                ip=gateway_candidato,
+                mac=gateway_mac,
+                hostname="Gateway",
+                confirmado_por_arp=True,
+                atualizar_subredes=True
+            )
+
         self._param_arps       = self._parametros_iface_seguro(self._interface_captura)
         self._periodo_timer_ms = self._param_arps.get("timer_ms", 30000)
         self._eh_wifi          = self._param_arps.get("wifi", False)
         self._limite_hosts     = self._param_arps.get(
             "limite_hosts", _DescobrirDispositivosThread.MAX_HOSTS
         )
+
+        # ── Sobrescrever com configurações do usuário (ConfigManager) ─────────
+        if self._config_manager:
+            limite_config = self._config_manager.limite_hosts
+            if limite_config > 0:
+                self._limite_hosts = limite_config
+                self._param_arps["limite_hosts"] = limite_config
+
+            timer_s = self._config_manager.obter("timer_redescoberta_s", 30)
+            if not self._eh_wifi and timer_s > 0:
+                self._periodo_timer_ms = timer_s * 1000
+
+            timeout_arp = self._config_manager.obter("timeout_arp_s", 1.8)
+            if timeout_arp > 0:
+                self._param_arps["timeout"] = timeout_arp
+
+        # Aplica o limite no visualizador de topologia
+        try:
+            self.painel_topologia.atualizar_limite_dispositivos(self._limite_hosts)
+        except Exception:
+            pass
+        # ─────────────────────────────────────────────────────────────────────
 
         self._instante_anterior    = time.perf_counter()
 
@@ -2701,7 +3461,7 @@ class JanelaPrincipal(QMainWindow):
             "total_pacotes":      self.analisador.total_pacotes,
             "estatisticas":       self.analisador.obter_estatisticas_protocolos(),
             "top_dispositivos":   self.analisador.obter_top_dispositivos(),
-            "dispositivos_ativos": len(self.analisador.trafego_dispositivos),
+            "dispositivos_ativos": self.painel_topologia.total_dispositivos_ativos(),
             "top_dns":            self.analisador.obter_top_dns(),
             "historias":          self._gerar_historias(),
         }
@@ -2782,7 +3542,7 @@ class JanelaPrincipal(QMainWindow):
             total_pacotes          =total_pacotes,
             total_bytes            =total_bytes,
             total_topologia        =self.painel_topologia.total_dispositivos(),
-            total_ativos           =self.painel_topologia.total_dispositivos(),
+            total_ativos           =self.painel_topologia.total_dispositivos_ativos(),
         )
         self.painel_topologia.atualizar()
 
@@ -2805,6 +3565,8 @@ class JanelaPrincipal(QMainWindow):
             f"  {cidr_label}  |  Dados: {kb/1024:.2f} MB  " if kb > 1024
             else f"  {cidr_label}  |  Dados: {kb:.1f} KB  "
         )
+
+        self._atualizar_status_hosts()
 
     # -------------------------------------------------------------------------
     # Motor pedagógico
@@ -2854,6 +3616,9 @@ class JanelaPrincipal(QMainWindow):
             "pausa":          1.0,
             "wifi":           self._eh_wifi,
             "timer_ms":       self._periodo_timer_ms,
+            "subredes_priorizadas": (
+                self._config_manager.subredes_priorizadas if self._config_manager else []
+            ),
         }
 
         self.descoberta_rodando = True
@@ -2862,10 +3627,20 @@ class JanelaPrincipal(QMainWindow):
             f"dispositivo(s) na rede {cidr_varredura or 'local'}…"
         )
 
+        desc_sel = self.combo_interface.currentText()
+        ip_local = (
+            self._mapa_interface_ip.get(desc_sel.strip(), "")
+            or self._mapa_interface_ip.get(desc_sel, "")
+            or obter_ip_local()
+        )
+        gateway_candidato = detectar_gateway_robusto(ip_local)
+
         self.descobridor = _DescobrirDispositivosThread(
             interface=self._interface_captura,
             cidr=cidr_varredura,
             parametros=parametros_leves,
+            ip_local=ip_local,
+            ip_gateway=gateway_candidato if gateway_candidato else ""
         )
         self.descobridor.dispositivo_encontrado.connect(self._ao_encontrar_dispositivo)
         self.descobridor.varredura_concluida.connect(self._ao_concluir_varredura_inicial)
@@ -2997,10 +3772,25 @@ class JanelaPrincipal(QMainWindow):
             f" Varrendo a rede local em busca de dispositivos em {cidr_varredura or 'local'}…"
         )
 
+        desc_sel = self.combo_interface.currentText()
+        ip_local = (
+            self._mapa_interface_ip.get(desc_sel.strip(), "")
+            or self._mapa_interface_ip.get(desc_sel, "")
+            or obter_ip_local()
+        )
+        gateway_candidato = detectar_gateway_robusto(ip_local)
+
         self.descobridor = _DescobrirDispositivosThread(
             interface=self._interface_captura,
             cidr=cidr_varredura,
-            parametros=self._param_arps,
+            parametros={
+                **self._param_arps,
+                "subredes_priorizadas": (
+                    self._config_manager.subredes_priorizadas if self._config_manager else []
+                ),
+            },
+            ip_local=ip_local,
+            ip_gateway=gateway_candidato if gateway_candidato else ""
         )
         self.descobridor.dispositivo_encontrado.connect(self._ao_encontrar_dispositivo)
         self.descobridor.varredura_concluida.connect(self._ao_concluir_varredura)
@@ -3113,8 +3903,8 @@ class JanelaPrincipal(QMainWindow):
                 &bull; Deep Packet Inspection: HTTP, HTTPS, DNS, ARP, DHCP, SSH, FTP, SMB, RDP<br>
                 &bull; Detecção de dados sensíveis, SQL Injection e XSS no tráfego<br>
                 &bull; Topologia interativa com zoom, pan e identificação por OUI/MAC<br>
-                &bull; Gráfico EMA com histórico de 2 horas e navegação temporal<br>
-                &bull; Servidor HTTP educacional com vulnerabilidades reais (SQLi, XSS, IDOR…)<br>
+                &bull; Gráfico EMA com histórico de navegação temporal<br>
+                &bull; Servidor HTTP educacional com vulnerabilidades testáveis (SQLi, XSS, IDOR…)<br>
                 &bull; Diagnóstico completo do sistema com exportação em .txt
             </p>
 
@@ -3153,11 +3943,11 @@ class JanelaPrincipal(QMainWindow):
         dlg.setMinimumSize(880, 640)
         dlg.resize(1020, 720)
         dlg.setStyleSheet("""
-            QDialog  { background: #11151b; color: #e5e7eb; }
+            QDialog  { background: #0a0e1a; color: #e5e7eb; }
             QLabel   { color: #e5e7eb; background: transparent; }
             QSplitter::handle { background: #2a3038; width: 1px; }
             QListWidget {
-                background: #151a22;
+                background: #111827;
                 border: 1px solid #2a3038;
                 border-radius: 4px;
                 color: #c7cdd6;
@@ -3174,7 +3964,7 @@ class JanelaPrincipal(QMainWindow):
             }
             QListWidget::item:hover:!selected { background: #1d232d; }
             QTextBrowser {
-                background: #10141a;
+                background: #0a0e1a;
                 border: 1px solid #2a3038;
                 border-radius: 4px;
                 padding: 10px 12px;
@@ -3192,7 +3982,7 @@ class JanelaPrincipal(QMainWindow):
             }
             QPushButton:hover { background: #303a49; }
             QScrollBar:vertical {
-                background: #10141a; width: 7px; border-radius: 3px;
+                background: #0a0e1a; width: 7px; border-radius: 3px;
             }
             QScrollBar::handle:vertical {
                 background: #3a4250; border-radius: 3px; min-height: 20px;
@@ -3216,713 +4006,21 @@ class JanelaPrincipal(QMainWindow):
             ("dicas",    "Dicas Avançadas"),
         ]
 
-        # ── Conteúdo HTML de cada seção ───────────────────────────────────────
-        CSS = """
-        <style>
-          body  { font-family:'Segoe UI',Arial,sans-serif;
-                  color:#d8dde5; background:#10141a;
-                  font-size:11px; line-height:1.65; margin:0; padding:0; }
-          h2    { color:#e5e7eb; font-size:15px; margin:0 0 4px 0; }
-          h3    { color:#cbd5e1; font-size:12px; margin:14px 0 4px 0; }
-          h4    { color:#d1d5db; font-size:11px; margin:10px 0 2px 0; }
-          b     { color:#f3f4f6; }
-          code  { background:#17202b; color:#dbeafe;
-                  padding:1px 5px; border-radius:3px;
-                  font-family:Consolas,monospace; font-size:10px; }
-          .muted{ color:#8792a2; font-size:10px; }
-          .ok   { color:#93c5a1; font-weight:bold; }
-          .warn { color:#d6b16a; font-weight:bold; }
-          .crit { color:#d28b8b; font-weight:bold; }
-          .info { color:#a8b4c4; font-weight:bold; }
-          .pill { display:inline-block; padding:1px 7px; border-radius:10px;
-                  font-size:9px; font-weight:bold; font-family:Consolas,monospace; }
-          .p-http,
-          .p-https,
-          .p-dns,
-          .p-arp,
-          .p-etc   { background:#17202b; color:#d8dde5; border:1px solid #2a3038; }
-          table { border-collapse:collapse; width:100%; margin:6px 0; font-size:10px; }
-          th    { background:#151a22; color:#a7b0bd; padding:5px 10px;
-                  text-align:left; border:1px solid #2a3038; }
-          td    { padding:5px 10px; border:1px solid #2a3038; color:#d8dde5; }
-          tr:nth-child(even) td { background:#121821; }
-          .box  { background:#151a22; border:1px solid #2a3038;
-                  border-radius:6px; padding:10px 14px; margin:8px 0; }
-          .box-warn { background:#1b1711; border:1px solid #4a3a1f;
-                      border-radius:6px; padding:10px 14px; margin:8px 0; }
-          .box-ok   { background:#121a15; border:1px solid #294936;
-                      border-radius:6px; padding:10px 14px; margin:8px 0; }
-          ul { margin:4px 0 8px 0; padding-left:18px; }
-          li { margin:3px 0; }
-          hr { border:0; height:1px; background:#2a3038; color:#2a3038; margin:14px 0; }
-        </style>
-        """
-
-        CONTEUDO = {
-
-            # ── REQUISITOS ────────────────────────────────────────────────────
-            "req": CSS + """<body>
-            <h2>Requisitos do Sistema</h2>
-            <p class="muted">Verifique todos os itens antes de iniciar.</p>
-            <hr>
-
-            <h3>Obrigatórios</h3>
-            <table>
-              <tr><th>Componente</th><th>Versão mínima</th><th>Como verificar</th></tr>
-              <tr><td><b>Windows</b></td><td>10 ou 11 (64-bit)</td><td>Sistema operacional</td></tr>
-              <tr><td><b>Python</b></td><td>3.11+</td><td><code>python --version</code></td></tr>
-              <tr><td><b>Npcap</b></td><td>1.70+</td><td>Painel de Controle → Programas</td></tr>
-              <tr><td><b>Privilégios</b></td><td>Administrador</td><td>Botão direito → "Executar como adm."</td></tr>
-            </table>
-
-            <div class="box-warn">
-              <b class="warn">⚠ Npcap — opção obrigatória na instalação</b><br>
-              Durante a instalação do Npcap, marque
-              <b>"WinPcap API-compatible Mode"</b>.
-              Sem essa opção, o Scapy não consegue abrir as interfaces
-              e nenhum pacote será capturado.
-            </div>
-
-            <h3>Dependências Python</h3>
-            <p>Instale todas com um único comando (dentro do ambiente virtual):</p>
-            <p><code>pip install -r requirements.txt</code></p>
-            <table>
-              <tr><th>Pacote</th><th>Função</th></tr>
-              <tr><td><code>PyQt6</code></td><td>Interface gráfica</td></tr>
-              <tr><td><code>scapy</code></td><td>Captura e análise de pacotes</td></tr>
-              <tr><td><code>pyqtgraph</code></td><td>Gráfico de tráfego em tempo real</td></tr>
-              <tr><td><code>manuf</code></td><td>Identificação de fabricantes por MAC/OUI</td></tr>
-              <tr><td><code>cryptography</code></td><td>Recursos criptográficos disponíveis ao projeto</td></tr>
-            </table>
-
-            <h3>Iniciando o NetLab</h3>
-            <div class="box">
-              <b>1.</b> Abra o PowerShell como <b>Administrador</b><br>
-              <b>2.</b> Ative o ambiente virtual:
-                  <code>.\\venv\\Scripts\\Activate.ps1</code><br>
-              <b>3.</b> Inicie a aplicação:
-                  <code>python main.py</code>
-            </div>
-            </body>""",
-
-            # ── INÍCIO RÁPIDO ─────────────────────────────────────────────────
-            "inicio": CSS + """<body>
-            <h2>Início Rápido</h2>
-            <p class="muted">Da abertura ao primeiro pacote em menos de 1 minuto.</p>
-            <hr>
-
-            <h3>Passo 1 — Escolha a interface</h3>
-            <p>No <b>combo no topo</b> da janela, selecione a placa de rede ativa.
-            O NetLab destaca automaticamente a interface com IP da rede local.
-            Em caso de dúvida, rode <code>python diagnostico.py</code> — ele testa
-            cada interface e mostra quantos pacotes cada uma captura em 4 segundos.</p>
-
-            <h3>Passo 2 — Inicie a captura</h3>
-            <p>Clique em <b>Iniciar Captura</b>. O botão passa a indicar
-            <b>Parar Captura</b>. Em alguns segundos:</p>
-            <ul>
-              <li>A aba <b>Topologia</b> começa a exibir dispositivos</li>
-              <li>A aba <b>Tráfego</b> mostra o gráfico de banda em tempo real</li>
-              <li>A aba <b>Modo Análise</b> acumula eventos por protocolo</li>
-            </ul>
-
-            <div class="box-ok">
-              <b class="ok">✓ Dica</b> — Abra o navegador e acesse qualquer site.
-              Em 2–3 segundos você verá eventos DNS e HTTPS aparecendo na aba
-              Modo Análise. É a confirmação mais rápida de que a captura está funcionando.
-            </div>
-
-            <h3>Passo 3 — Explore as abas</h3>
-            <table>
-              <tr><th>Aba</th><th>O que fazer</th></tr>
-              <tr><td><b>Topologia</b></td>
-                  <td>Clique em um nó para ver IP, MAC e fabricante</td></tr>
-              <tr><td><b>Tráfego</b></td>
-                  <td>Observe o pico de banda ao abrir um site pesado</td></tr>
-              <tr><td><b>Modo Análise</b></td>
-                  <td>Clique em um evento HTTP para ver a explicação completa</td></tr>
-              <tr><td><b>Servidor</b></td>
-                  <td>Inicie o servidor e acesse pelo navegador da turma</td></tr>
-            </table>
-
-            <h3>Encerrando a sessão</h3>
-            <p>Clique em <b>Parar Captura</b> para encerrar o sniffer mantendo
-            todos os dados visíveis. Use <b>Arquivo → Nova Sessão</b> para apagar
-            tudo e começar um novo experimento do zero.</p>
-            </body>""",
-
-            # ── INTERFACE DE REDE ─────────────────────────────────────────────
-            "iface": CSS + """<body>
-            <h2>Seleção de Interface de Rede</h2>
-            <p class="muted">Escolher a interface errada é a causa mais comum de captura vazia.</p>
-            <hr>
-
-            <h3>Como o NetLab detecta as interfaces</h3>
-            <p>O NetLab usa o Scapy (via Npcap) para listar os adaptadores disponíveis
-            e cruza com os dados do Windows (<code>Get-NetIPAddress</code>) para
-            associar cada interface ao seu IP e máscara de sub-rede.
-            A interface com o IP da rede local ativa é pré-selecionada automaticamente.</p>
-
-            <h3>Nomes de interface no Windows</h3>
-            <p>No Windows, os nomes são longos e incluem o GUID do adaptador.
-            Exemplos típicos:</p>
-            <div class="box">
-              <code>Intel(R) Wi-Fi 6 AX201 160MHz</code> → Wi-Fi<br>
-              <code>Realtek PCIe GbE Family Controller</code> → Ethernet<br>
-              <code>\\Device\\NPF_{GUID}</code> → formato interno do Npcap
-            </div>
-
-            <h3>Diagnosticando a interface correta</h3>
-            <p>Se nenhum pacote aparecer após 30 segundos capturando e navegando na web:</p>
-            <ul>
-              <li>Abra um terminal <b>como Administrador</b></li>
-              <li>Execute <code>python diagnostico.py</code></li>
-              <li>O script testa cada interface por 4 s e mostra quais capturam pacotes</li>
-              <li>Copie o nome exato da interface ativa e selecione no NetLab</li>
-            </ul>
-
-            <h3>Sub-rede detectada</h3>
-            <p>Após iniciar a captura, o NetLab detecta automaticamente o CIDR da
-            sua rede (ex: <code>192.168.1.0/24</code>). Este valor aparece na
-            barra de status inferior. A topologia usa esse CIDR para diferenciar
-            hosts locais de tráfego externo (agrupado como "Internet").</p>
-
-            <h3>Wi-Fi — limitação importante</h3>
-            <div class="box-warn">
-              <b class="warn">⚠ Wi-Fi no Windows</b><br>
-              Drivers Wi-Fi no Windows bloqueiam captura de frames de
-              <i>outros dispositivos</i> mesmo em modo promíscuo.
-              Você consegue capturar apenas o seu próprio tráfego.<br><br>
-              <b>Solução para sala de aula:</b> ative o
-              <b>Hotspot do Windows</b> no computador com o NetLab
-              e conecte os dispositivos dos alunos nele.
-              O adaptador em modo hotspot captura todo o tráfego
-              que passa por ele.
-            </div>
-            </body>""",
-
-            # ── TOPOLOGIA ─────────────────────────────────────────────────────
-            "topo": CSS + """<body>
-            <h2>Topologia da Rede</h2>
-            <p class="muted">Mapa interativo e animado dos dispositivos detectados.</p>
-            <hr>
-
-            <h3>Navegação no mapa</h3>
-            <table>
-              <tr><th>Ação</th><th>Efeito</th></tr>
-              <tr><td><b>Scroll do mouse</b></td><td>Zoom in / Zoom out</td></tr>
-              <tr><td><b>Arrastar (clique esq + mover)</b></td><td>Mover o mapa</td></tr>
-              <tr><td><b>Botão direito</b></td><td>Resetar zoom e posição</td></tr>
-              <tr><td><b>Clique em um nó</b></td><td>Abre o painel lateral com detalhes</td></tr>
-              <tr><td><b>Duplo clique em um nó</b></td><td>Define um apelido personalizado</td></tr>
-              <tr><td><b>Clique em área vazia</b></td><td>Fecha o painel de detalhes</td></tr>
-            </table>
-
-            <h3>Tipos de nós</h3>
-            <table>
-              <tr><th>Tipo visual</th><th>Significado</th></tr>
-              <tr><td><b>Este computador</b></td>
-                  <td>Este computador (IP local da interface selecionada)</td></tr>
-              <tr><td><b>Dispositivo local</b></td>
-                  <td>Dispositivo da rede local</td></tr>
-              <tr><td><b>Gateway</b></td>
-                  <td>Gateway / Roteador (último octeto .1 ou .254)</td></tr>
-              <tr><td><b>Internet</b></td>
-                  <td>Internet (todos os IPs externos agrupados)</td></tr>
-            </table>
-
-            <h3>Tamanho dos nós</h3>
-            <p>O raio de cada nó é <b>proporcional ao volume de tráfego</b>
-            gerado/recebido por aquele host. Um nó grande indica alto tráfego;
-            nós pequenos são dispositivos com pouca atividade na sessão.</p>
-
-            <h3>Painel de detalhes (ao clicar em um nó)</h3>
-            <p>O painel lateral exibe:</p>
-            <ul>
-              <li><b>IP</b> e <b>MAC</b> do dispositivo</li>
-              <li><b>Fabricante</b> identificado pelo OUI (3 primeiros bytes do MAC)</li>
-              <li><b>Tipo inferido:</b> Gateway, Computador, Celular, Smart TV, etc.</li>
-              <li><b>Confiança:</b> <span class="ok">CONFIRMADO</span> (visto via ARP)
-                  ou <span class="warn">OBSERVADO</span> (inferido por tráfego)</li>
-              <li><b>Portas</b> de destino usadas (até 8 exibidas)</li>
-              <li><b>Volume</b> estimado de tráfego</li>
-              <li><b>Apelido</b> personalizado (se definido)</li>
-            </ul>
-
-            <h3>Apelidos de dispositivos</h3>
-            <p>Dê um duplo clique em qualquer nó para definir um nome amigável
-            (ex: "PC da Professora", "Celular João"). O apelido é salvo em
-            <code>dados/aliases.json</code> e persiste entre sessões.</p>
-
-            <h3>Sub-redes</h3>
-            <p>O NetLab detecta automaticamente sub-redes via tabela de rotas do
-            Windows e as destaca com contornos coloridos ao redor dos nós:</p>
-            <ul>
-              <li><span class="ok">Verde sólido</span> = visibilidade total (todos os hosts conhecidos)</li>
-              <li><span class="warn">Amarelo sólido</span> = visibilidade parcial</li>
-              <li><span class="p-etc">Roxo tracejado</span> = sub-rede inferida pelas rotas</li>
-            </ul>
-
-            <h3>Descoberta automática de dispositivos</h3>
-            <p>Ao iniciar a captura, o NetLab executa:</p>
-            <ul>
-              <li><b>ARP sweep</b> na rede local (~4 s após iniciar)</li>
-              <li><b>Importação da tabela ARP</b> do Windows a cada 60 s</li>
-              <li><b>Re-varredura periódica</b> conforme timer configurado</li>
-              <li><b>Captura passiva</b> contínua: todo pacote com MAC válido
-                  registra o dispositivo de origem automaticamente</li>
-            </ul>
-            </body>""",
-
-            # ── TRÁFEGO ───────────────────────────────────────────────────────
-            "trafego": CSS + """<body>
-            <h2>Tráfego em Tempo Real</h2>
-            <p class="muted">Gráfico de banda + tabelas de protocolos e dispositivos.</p>
-            <hr>
-
-            <h3>O gráfico de banda</h3>
-            <p>O gráfico exibe <b>KB/s</b> ao longo do tempo com duas curvas sobrepostas:</p>
-            <ul>
-              <li><b>Curva cinza-azul (fina):</b> sinal bruto — mostra a volatilidade real</li>
-              <li><b>Curva azul brilhante (preenchida):</b> média EMA suavizada —
-                  revela a tendência sem o ruído de picos momentâneos</li>
-            </ul>
-
-            <h3>Controle de suavização (slider EMA)</h3>
-            <p>O slider <b>EMA</b> no canto inferior direito controla o fator α (0.05–0.50):</p>
-            <ul>
-              <li><b>Esquerda (α baixo):</b> curva muito suave, reage devagar a mudanças</li>
-              <li><b>Direita (α alto):</b> curva sensível, segue o sinal bruto de perto</li>
-            </ul>
-            <p>Ao mover o slider, o histórico inteiro é recomputado instantaneamente.</p>
-
-            <h3>Navegação temporal</h3>
-            <p>O histórico guarda até <b>2 horas</b> de amostras (1 amostra/segundo).
-            Use os botões da barra de controles para navegar:</p>
-            <table>
-              <tr><th>Botão</th><th>Ação</th></tr>
-              <tr><td><code>|&lt;</code></td><td>Ir para o início do histórico</td></tr>
-              <tr><td><code>&lt;30s</code> / <code>&lt;10s</code></td>
-                  <td>Retroceder 30 ou 10 segundos</td></tr>
-              <tr><td><code>|| Pausar</code></td>
-                  <td>Congelar a exibição (captura continua em segundo plano)</td></tr>
-              <tr><td><code>10s&gt;</code> / <code>30s&gt;</code></td>
-                  <td>Avançar no tempo</td></tr>
-              <tr><td><code>&gt;&gt; Ao Vivo</code></td>
-                  <td>Voltar para o tempo real</td></tr>
-            </table>
-
-            <h3>Crosshair e tooltip</h3>
-            <p>Passe o mouse sobre o gráfico para ativar o crosshair. O tooltip
-            exibe o <b>valor EMA exato</b> (em KB/s) do ponto apontado.</p>
-
-            <h3>Cards de resumo (topo)</h3>
-            <table>
-              <tr><th>Card</th><th>O que mostra</th></tr>
-              <tr><td><b>Total de Pacotes</b></td><td>Pacotes capturados na sessão</td></tr>
-              <tr><td><b>Dados Transmitidos</b></td><td>Volume total acumulado (KB ou MB)</td></tr>
-              <tr><td><b>Dispositivos Ativos</b></td>
-                  <td>Hosts que geraram tráfego nesta sessão</td></tr>
-            </table>
-
-            <h3>Tabelas laterais</h3>
-            <p><b>Protocolos Detectados:</b> lista os protocolos por volume de pacotes
-            e dados. Atualizada em tempo real.<br>
-            <b>Top Dispositivos por Tráfego:</b> lista os IPs que mais
-            enviaram/receberam dados. IPs externos são agrupados em
-            <code>internet</code>.</p>
-            </body>""",
-
-            # ── MODO ANÁLISE ──────────────────────────────────────────────────
-            "analise": CSS + """<body>
-            <h2>Modo Análise</h2>
-            <p class="muted">Explicações didáticas para cada evento de rede capturado.</p>
-            <hr>
-
-            <h3>A lista de eventos (painel esquerdo)</h3>
-            <p>Cada linha representa um evento de rede capturado e analisado.
-            A faixa colorida na borda esquerda indica o protocolo.
-            A linha exibe: protocolo, IP de origem → destino,
-            sub-informação (domínio, porta, etc.) e horário.</p>
-
-            <h3>Badges de filtro por protocolo</h3>
-            <p>Clique em qualquer badge para filtrar a lista:</p>
-            <p>
-              <span class="pill p-https">HTTPS</span>&nbsp;
-              <span class="pill p-http">HTTP</span>&nbsp;
-              <span class="pill p-dns">DNS</span>&nbsp;
-              <span class="pill p-arp">ARP</span>&nbsp;
-              <span class="pill p-etc">ICMP</span>&nbsp;
-              <span class="pill p-etc">SYN</span>&nbsp;
-              <span class="pill p-etc">DHCP</span>&nbsp;
-              <span class="pill p-etc">SSH</span>&nbsp;
-              <span class="pill p-etc">FTP</span>&nbsp;
-              <span class="pill p-etc">SMB</span>&nbsp;
-              <span class="pill p-etc">RDP</span>
-            </p>
-            <p>O número ao lado do badge é a contagem de eventos do protocolo
-            na sessão atual. Clique em <b>Todos</b> para remover o filtro.</p>
-
-            <h3>Campo de busca</h3>
-            <p>Filtra a lista por <b>IP, domínio ou tipo de protocolo</b>.
-            A busca é em tempo real com debounce de 100 ms para não travar a UI.
-            Clique no <b>✕</b> para limpar.</p>
-
-            <h3>As três abas de detalhe</h3>
-            <p>Clique em qualquer evento para ver a análise completa no painel direito:</p>
-
-            <h4>ANÁLISE — O que aconteceu</h4>
-            <p>Explicação em linguagem acessível do evento capturado:
-            qual protocolo agiu, por que, e o que significa do ponto de vista
-            de segurança. Inclui a seção <b>Como Funciona</b> com o
-            fluxo técnico passo a passo usando os dados reais do pacote
-            (IPs, portas, domínio, tamanho).</p>
-
-            <h4>EVIDÊNCIAS — Campos técnicos reais</h4>
-            <p>Grade com os metadados brutos do pacote: IP origem/destino,
-            protocolo, porta, tamanho, TTL, flag de criptografia.
-            Para eventos HTTP: exibe os <b>headers completos</b> e, quando
-            presentes, o <b>formulário decodificado</b> com campos sensíveis
-            sinalizados em destaque.</p>
-
-            <h4>NA PRÁTICA — Significado operacional</h4>
-            <p>O que este evento implica na prática: boas práticas, riscos reais,
-            comandos de diagnóstico e vetores de ataque conhecidos.
-            Para HTTP com payload: exibe o <b>hexdump</b> dos primeiros 1024 bytes.</p>
-
-            <h3>Níveis de alerta</h3>
-            <table>
-              <tr><th>Nível</th><th>Quando é atribuído</th><th>Exemplo</th></tr>
-              <tr><td><span class="info">● INFO</span></td>
-                  <td>Atividade normal de rede</td>
-                  <td>Consulta DNS, ICMP ping, HTTPS</td></tr>
-              <tr><td><span class="warn">● AVISO</span></td>
-                  <td>Protocolo inseguro em uso ou dado que merece atenção</td>
-                  <td>Cookie via HTTP, FTP ativo, SMB detectado</td></tr>
-              <tr><td><span class="crit">CRITICO</span></td>
-                  <td>Dado sensível exposto ou padrão de ataque confirmado</td>
-                  <td>Credenciais em texto puro, SQL Injection, XSS no tráfego</td></tr>
-            </table>
-
-            <h3>Detecção automática de dados sensíveis</h3>
-            <p>O motor pedagógico analisa cada requisição HTTP em busca de campos como
-            <code>password</code>, <code>token</code>, <code>api_key</code>,
-            <code>cpf</code>, <code>credit_card</code>, <code>sessao</code>,
-            entre mais de 50 nomes conhecidos. Quando encontrado, o campo é
-            exibido em destaque na aba Evidências e gera um alerta correspondente.</p>
-
-            <h3>Histórico de eventos</h3>
-            <p>A lista mantém até <b>1.500 eventos</b> por sessão. Novos eventos
-            são adicionados ao final. Use os filtros para encontrar rapidamente
-            o que interessa sem perder o histórico.</p>
-            </body>""",
-
-            # ── SERVIDOR DE LABORATÓRIO ───────────────────────────────────────
-            "servidor": CSS + """<body>
-            <h2>Servidor de Laboratório</h2>
-            <p class="muted">Servidor HTTP educacional com vulnerabilidades reais para demonstração em sala.</p>
-            <hr>
-
-            <h3>Iniciando o servidor</h3>
-            <ol style="margin:6px 0 10px 0; padding-left:18px;">
-              <li>Acesse a aba <b>Servidor</b></li>
-              <li>Ajuste a porta (padrão: <code>8080</code>) com os botões +/−</li>
-              <li>Clique em <b>Iniciar Servidor</b></li>
-              <li>O endereço de acesso aparece no painel:
-                  <code>http://&lt;seu-ip&gt;:8080/</code></li>
-            </ol>
-            <p>Acesse pelo navegador de qualquer dispositivo na mesma rede Wi-Fi.
-            Todos os dados ficam em memória RAM e são destruídos ao parar o servidor.</p>
-
-            <h3>Credenciais padrão</h3>
-            <table>
-              <tr><th>Usuário</th><th>Senha</th><th>Papel</th></tr>
-              <tr><td><code>admin</code></td><td><code>123456</code></td><td>admin</td></tr>
-              <tr><td><code>alice</code></td><td><code>alice123</code></td><td>user</td></tr>
-              <tr><td><code>bob</code></td><td><code>bob456</code></td><td>user</td></tr>
-              <tr><td><code>carlos</code></td><td><code>senha123</code></td><td>user</td></tr>
-            </table>
-
-            <h3>Rotas disponíveis</h3>
-            <table>
-              <tr><th>Rota</th><th>Vulnerabilidade demonstrada</th></tr>
-              <tr><td><code>/</code></td><td>Página inicial — estado da sessão</td></tr>
-              <tr><td><code>/login</code></td>
-                  <td>SQL Injection (concatenação direta) + força bruta sem limite</td></tr>
-              <tr><td><code>/register</code></td>
-                  <td>SQL Injection no INSERT + senhas em texto puro</td></tr>
-              <tr><td><code>/produtos?id=</code></td>
-                  <td>SQL Injection no parâmetro <code>id</code> (UNION SELECT funciona)</td></tr>
-              <tr><td><code>/busca?q=</code></td>
-                  <td>XSS Refletido — parâmetro <code>q</code> sem escape</td></tr>
-              <tr><td><code>/perfil?nome=</code></td>
-                  <td>XSS Refletido — parâmetro <code>nome</code> sem escape</td></tr>
-              <tr><td><code>/comentarios</code></td>
-                  <td>XSS Armazenado + CSRF (sem token de proteção)</td></tr>
-              <tr><td><code>/pedidos?id=</code></td>
-                  <td>IDOR — acessa pedido de qualquer usuário sem autenticação</td></tr>
-              <tr><td><code>/usuarios</code></td>
-                  <td>Divulgação de senhas em texto puro sem autenticação</td></tr>
-              <tr><td><code>/api/usuarios</code></td>
-                  <td>API JSON que expõe todos os usuários e senhas sem auth</td></tr>
-            </table>
-
-            <h3>Exemplos de ataques para demonstrar</h3>
-
-            <h4>SQL Injection no login</h4>
-            <p>No campo usuário, digite:</p>
-            <p><code>' OR '1'='1</code></p>
-            <p>O servidor executa a query sem parametrização e autentica sem senha.
-            O NetLab detecta o padrão e registra o alerta na aba Servidor.</p>
-
-            <h4>SQL Injection UNION SELECT em /produtos</h4>
-            <p>Acesse: <code>/produtos?id=0 UNION SELECT id,username,password FROM users--</code></p>
-            <p>A resposta retorna os dados da tabela de usuários no lugar do produto.</p>
-
-            <h4>XSS Refletido em /busca</h4>
-            <p>Acesse: <code>/busca?q=&lt;script&gt;alert('XSS')&lt;/script&gt;</code></p>
-            <p>O script é executado no navegador da vítima porque o parâmetro
-            é refletido sem escape HTML.</p>
-
-            <h4>XSS Armazenado em /comentarios</h4>
-            <p>Faça login e publique o comentário:</p>
-            <p><code>&lt;script&gt;document.write('&lt;img src=x onerror=alert(document.cookie)&gt;')&lt;/script&gt;</code></p>
-            <p>Todos que abrirem a página de comentários executarão o script.</p>
-
-            <h4>IDOR em /pedidos</h4>
-            <p>Acesse <code>/pedidos?id=1</code>, depois <code>?id=2</code>, etc.
-            Os pedidos de todos os usuários são acessíveis sem qualquer
-            verificação de autorização.</p>
-
-            <h3>Painel do servidor</h3>
-            <p>A aba Servidor exibe em tempo real:</p>
-            <ul>
-              <li><b>Tabela de requisições:</b> hora, IP, método, endpoint, tamanho, tempo</li>
-              <li><b>Log de alertas:</b> cada ataque detectado aparece com tipo e payload</li>
-              <li><b>Métricas:</b> total de requisições, dados, clientes únicos e carga</li>
-            </ul>
-
-            <div class="box-warn">
-              <b class="warn">⚠ Aviso</b><br>
-              Este servidor implementa vulnerabilidades reais. Use apenas em redes
-              controladas (sala de aula, laboratório local). Nunca exponha na internet.
-            </div>
-            </body>""",
-
-            # ── DIAGNÓSTICO ───────────────────────────────────────────────────
-            "diag": CSS + """<body>
-            <h2>Painel de Diagnóstico</h2>
-            <p class="muted">Acesse via botão "Diagnóstico" na barra de ferramentas.</p>
-            <hr>
-
-            <h3>O que o diagnóstico verifica</h3>
-            <table>
-              <tr><th>Seção</th><th>O que mostra</th></tr>
-              <tr><td><b>Checklist Rápido</b></td>
-                  <td>Status de admin, Npcap, Scapy, DNS e gateway — tudo em um relance</td></tr>
-              <tr><td><b>Interface e Estatísticas</b></td>
-                  <td>Interface selecionada, IP local, pacotes capturados,
-                      drops e erros de recepção (via psutil)</td></tr>
-              <tr><td><b>Sinal Wi-Fi</b></td>
-                  <td>SSID, BSSID, sinal em %, canal e velocidade de recepção</td></tr>
-              <tr><td><b>Versões dos Componentes</b></td>
-                  <td>Python, Npcap, Scapy, PyQt6 e versão do SO</td></tr>
-              <tr><td><b>Conectividade de Rede</b></td>
-                  <td>Ping real ao gateway (latência média e % de perda)
-                      + resolução DNS com tempo de resposta</td></tr>
-              <tr><td><b>Pendências Detectadas</b></td>
-                  <td>Lista problemas e avisos identificados automaticamente</td></tr>
-            </table>
-
-            <h3>Barra de saúde do sistema</h3>
-            <p>A barra no topo do diagnóstico pontua de 0 a 10 os itens críticos:</p>
-            <ul>
-              <li><span class="ok">8 a 10</span> — sistema saudável</li>
-              <li><span class="warn">5 a 7</span> — atenção necessária</li>
-              <li><span class="crit">0 a 4</span> — problemas encontrados</li>
-            </ul>
-
-            <h3>Drops e erros de interface</h3>
-            <p>Se o campo <b>Pacotes descartados</b> mostrar valor &gt; 0,
-            o Npcap está descartando pacotes antes de entregá-los ao Scapy.
-            Causas comuns: tráfego muito intenso, limite de buffer do Npcap,
-            ou driver desatualizado. Reduza o tráfego ou atualize o Npcap.</p>
-
-            <h3>Atualizar a tela</h3>
-            <p>Clique em <b>Atualizar</b> para executar todos os testes novamente.
-            Útil após conectar um cabo de rede ou reiniciar o adaptador Wi-Fi.</p>
-            </body>""",
-
-            # ── PROBLEMAS COMUNS ──────────────────────────────────────────────
-            "problems": CSS + """<body>
-            <h2>Solução de Problemas Comuns</h2>
-            <hr>
-
-            <h3>Nenhum pacote é capturado</h3>
-            <div class="box">
-              <b>1.</b> O NetLab está rodando como <b>Administrador</b>?<br>
-              <b>2.</b> O <b>Npcap</b> está instalado com
-                  <b>"WinPcap API-compatible Mode"</b>?<br>
-              <b>3.</b> A interface correta está selecionada? Rode
-                  <code>python diagnostico.py</code> para identificar qual captura.<br>
-              <b>4.</b> Tente reinstalar o Npcap marcando essa opção.
-            </div>
-
-            <h3>A topologia fica vazia</h3>
-            <div class="box">
-              Aguarde pelo menos <b>5–10 segundos</b> após iniciar a captura.
-              A varredura ARP inicial demora ~4 s para completar.<br>
-              Se mesmo assim ficar vazia: abra um navegador e acesse um site —
-              o tráfego HTTP/DNS deve registrar seu IP imediatamente.
-            </div>
-
-            <h3>Interface não aparece no combo</h3>
-            <div class="box">
-              Execute como Administrador. O Npcap requer privilégios elevados
-              para listar adaptadores. Sem admin, a lista pode ficar em branco.
-            </div>
-
-            <h3>Erro "Npcap not found" ou "No module named scapy"</h3>
-            <div class="box">
-              Instale as dependências no ambiente virtual:
-              <code>pip install -r requirements.txt</code><br>
-              Certifique-se de estar com o venv ativo:<br>
-              <code>.\\venv\\Scripts\\Activate.ps1</code>
-            </div>
-
-            <h3>O servidor de laboratório não abre no navegador</h3>
-            <div class="box">
-              <b>1.</b> Verifique se o servidor está ativo (botão deve mostrar "Parar Servidor").<br>
-              <b>2.</b> Certifique-se de usar o IP da rede local, não <code>localhost</code>,
-                  ao acessar de outro dispositivo.<br>
-              <b>3.</b> O firewall do Windows pode bloquear a porta.
-                  Adicione uma exceção para a porta configurada (padrão 8080).
-            </div>
-
-            <h3>Gráfico de tráfego não atualiza</h3>
-            <div class="box">
-              Verifique se o <b>PyQtGraph</b> está instalado:
-              <code>pip install pyqtgraph</code><br>
-              Sem ele, o gráfico exibe apenas uma mensagem de aviso.
-            </div>
-
-            <h3>Fabricante aparece como "Desconhecido"</h3>
-            <div class="box">
-              A base OUI local pode estar desatualizada ou ausente.<br>
-              Acesse <b>Monitoramento → Atualizar Base de Fabricantes</b>
-              para baixar a versão mais recente do Wireshark (requer internet).
-            </div>
-
-            <h3>Letras com acento aparecem incorretas (mojibake)</h3>
-            <div class="box">
-              Causado por encoding errado ao ler saída de comandos Windows.
-              O NetLab aplica correção automática (<code>corrigir_mojibake()</code>)
-              na maioria dos campos. Se persistir em algum campo específico,
-              reporte via GitHub.
-            </div>
-
-            <h3>UI trava ou fica lenta durante captura intensa</h3>
-            <div class="box">
-              Em redes com alto volume de tráfego, reduza a pressão sobre a UI:<br>
-              <b>1.</b> O analisador limita automaticamente a 800 pacotes/s
-                  (400 no Wi-Fi).<br>
-              <b>2.</b> Se ainda travar, feche a aba Modo Análise — a renderização
-                  de eventos pedagógicos consome mais CPU.<br>
-              <b>3.</b> Verifique o plano de energia do Windows: use
-                  <b>Alto Desempenho</b> em vez de Economia de Energia.
-            </div>
-            </body>""",
-
-            # ── DICAS AVANÇADAS ───────────────────────────────────────────────
-            "dicas": CSS + """<body>
-            <h2>Dicas e Uso Avançado</h2>
-            <hr>
-
-            <h3>Capturar tráfego de toda a turma (Wi-Fi)</h3>
-            <p>No Windows, ative o <b>Hotspot Móvel</b> no computador com o NetLab
-            (Configurações → Rede → Hotspot Móvel). Conecte os dispositivos dos alunos
-            nesse hotspot. O adaptador em modo AP captura todo o tráfego que passa
-            por ele, permitindo demonstrar ataques e respostas para toda a turma.</p>
-
-            <h3>Usar o servidor vulnerável com o Modo Análise</h3>
-            <ol style="padding-left:18px;">
-              <li>Inicie a captura (interface local)</li>
-              <li>Inicie o servidor na aba Servidor</li>
-              <li>Abra o browser e acesse <code>http://&lt;ip&gt;:8080/login</code></li>
-              <li>Tente o ataque SQLi (<code>' OR '1'='1</code>)</li>
-              <li>Alterne para a aba <b>Modo Análise</b> — o NetLab deve exibir
-                  o evento HTTP com o payload e o alerta correspondente</li>
-            </ol>
-            <p>Esta combinação é o fluxo didático completo: ataque → captura → análise.</p>
-
-            <h3>Filtrar por protocolo e exportar mentalmente</h3>
-            <p>No Modo Análise, filtre por <span class="pill p-http">HTTP</span> e
-            percorra os eventos para ver todas as requisições sem criptografia da sessão.
-            Compare com <span class="pill p-https">HTTPS</span> — note que o conteúdo
-            de HTTPS nunca aparece, apenas o SNI (nome do servidor).</p>
-
-            <h3>Identificar o sistema operacional de um host pelo TTL</h3>
-            <p>Clique em um evento <b>TCP SYN</b> ou <b>ICMP</b> na aba Análise.
-            A seção "Evidências" exibe o TTL do pacote.
-            O motor pedagógico estima automaticamente o SO:</p>
-            <table>
-              <tr><th>TTL observado</th><th>SO provável</th></tr>
-              <tr><td>120–128</td><td>Windows (padrão 128)</td></tr>
-              <tr><td>55–64</td><td>Linux / macOS (padrão 64)</td></tr>
-              <tr><td>&lt; 32</td><td>Dispositivo embarcado (padrão 32)</td></tr>
-            </table>
-
-            <h3>Aliases persistem entre sessões</h3>
-            <p>Os apelidos definidos via duplo clique na topologia são salvos em
-            <code>dados/aliases.json</code>. Você pode editar esse arquivo
-            diretamente para importar uma lista de dispositivos rotulados
-            antes da aula (ex: "PC-01", "Switch-Sala3").</p>
-
-            <h3>Linha de comando para testes rápidos de interface</h3>
-            <p>Sem abrir o NetLab, use o script de diagnóstico standalone:</p>
-            <p><code>python diagnostico.py</code></p>
-            <p>Ele lista todas as interfaces, captura 4 s em cada uma e mostra
-            quantos pacotes foram recebidos. É a forma mais rápida de confirmar
-            qual interface está ativa em um novo ambiente.</p>
-
-            <h3>Nova Sessão vs. Parar Captura</h3>
-            <table>
-              <tr><th>Ação</th><th>O que limpa</th><th>Quando usar</th></tr>
-              <tr><td><b>Parar Captura</b></td>
-                  <td>Para o sniffer — dados permanecem visíveis</td>
-                  <td>Para pausar e analisar com calma</td></tr>
-              <tr><td><b>Arquivo → Nova Sessão</b></td>
-                  <td>Apaga tudo: topologia, gráfico, eventos, sub-redes</td>
-                  <td>Entre experimentos distintos</td></tr>
-            </table>
-
-            <h3>Atualizar a base de fabricantes offline</h3>
-            <p>Se o ambiente não tiver internet, copie o arquivo
-            <code>manuf</code> (da base Wireshark) para
-            <code>~/.cache/manuf/manuf</code> manualmente.
-            O GerenciadorDispositivos carrega automaticamente desse caminho
-            na próxima inicialização.</p>
-            </body>""",
-        }
-
         # ── Layout ────────────────────────────────────────────────────────────
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(6)
 
-        # Cabeçalho
         lbl_titulo = QLabel("Manual de Uso — NetLab Educacional")
         lbl_titulo.setStyleSheet(
             "font-size:13px; font-weight:bold; color:#e5e7eb; padding:1px 0;"
         )
         layout.addWidget(lbl_titulo)
 
-        # Splitter: índice (esq) + conteúdo (dir)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
         splitter.setChildrenCollapsible(False)
 
-        # Índice lateral
         lista = QListWidget()
         lista.setMinimumWidth(210)
         lista.setMaximumWidth(210)
@@ -3930,10 +4028,9 @@ class JanelaPrincipal(QMainWindow):
             item = QListWidgetItem(rotulo)
             lista.addItem(item)
 
-        # Área de conteúdo
         browser = QTextBrowser()
         browser.setOpenExternalLinks(False)
-        browser.setHtml(CONTEUDO["req"])
+        browser.setHtml(montar_html_secao(CONTEUDO_MANUAL["req"]))
 
         splitter.addWidget(lista)
         splitter.addWidget(browser)
@@ -3942,7 +4039,6 @@ class JanelaPrincipal(QMainWindow):
         splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter, 1)
 
-        # Rodapé
         row = QHBoxLayout()
         lbl_hint = QLabel("Clique em uma seção no índice para navegar")
         lbl_hint.setStyleSheet("color:#8792a2; font-size:9px;")
@@ -3954,11 +4050,10 @@ class JanelaPrincipal(QMainWindow):
         row.addWidget(btn_fechar)
         layout.addLayout(row)
 
-        # Navegação pelo índice
         def _ao_selecionar(row_idx: int):
             chave = SECOES[row_idx][0]
-            html  = CONTEUDO.get(chave, "")
-            pos   = browser.verticalScrollBar().value()
+            corpo = CONTEUDO_MANUAL.get(chave, "")
+            html = montar_html_secao(corpo)
             browser.setHtml(html)
             browser.verticalScrollBar().setValue(0)
 
